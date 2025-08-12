@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Hệ thống đếm bao</title>
+  <link rel="stylesheet" href="style.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+</head>
+<body>
+  <div class="app-header">HỆ THỐNG ĐẾM BAO</div>
+  <div class="app-container">
+    <!-- Tab navigation -->
+    <div class="tab-nav">
+      <button class="tab-btn active" id="tabMainBtn" onclick="showTab('main')"><i class="fa fa-home"></i></button>
+      <button class="tab-btn" id="tabHistoryBtn" onclick="showTab('history')"><i class="fa fa-list"></i></button>
+      <button class="tab-btn" id="tabTypeBtn" onclick="showTab('type')"><i class="fa fa-cog"></i></button>
+      <button class="tab-btn" id="tabConfigBtn" onclick="showTab('config')"><i class="fa fa-sliders-h"></i></button>
+    </div>
+    <!-- Main tab -->
+    <div class="tab-content" id="tabMain">
+      <div class="section">
+        <div class="row time-row">
+          <span>Thời gian bắt đầu</span>
+          <input type="text" id="startTime" readonly value="11:00 - 01/06/2025">
+        </div>
+        <div class="order-header">
+          <span>Danh sách đơn hàng</span>
+          <button class="delete-all-btn" onclick="deleteAllOrders()"><i class="fa fa-trash"></i> Xóa tất cả</button>
+        </div>
+        <div id="orderList"></div>
+        <div class="row">
+          <span>Tiếp tục đếm khi kết thúc đơn hàng</span>
+          <label class="switch"><input type="checkbox" id="continueSwitch"><span class="slider"></span></label>
+        </div>
+        <div class="controls">
+          <button class="ctrl-btn" onclick="sendCmd('start')"><i class="fa fa-play"></i></button>
+          <button class="ctrl-btn" onclick="sendCmd('pause')"><i class="fa fa-pause"></i></button>
+          <button class="ctrl-btn" onclick="sendCmd('reset')"><i class="fa fa-stop"></i></button>
+        </div>
+      </div>
+    </div>
+    <!-- History tab -->
+    <div class="tab-content" id="tabHistory" style="display:none">
+      <div class="section">
+        <div class="section-title">Lịch sử đếm</div>
+        <div id="historyList"></div>
+      </div>
+    </div>
+    <!-- Type tab -->
+    <div class="tab-content" id="tabType" style="display:none">
+      <div class="section">
+        <div class="section-title">CÀI ĐẶT LOẠI</div>
+        <div class="type-container">
+          <div class="type-input-group">
+            <input type="text" id="newTypeInput" placeholder="Nhập loại mới" class="type-input">
+            <button class="type-btn add" onclick="saveType()"><i class="fa fa-plus"></i> Thêm mới</button>
+          </div>
+          <div id="typeList"></div>
+        </div>
+      </div>
+    </div>
+    <!-- Config tab -->
+    <div class="tab-content" id="tabConfig" style="display:none">
+      <div class="section">
+        <div class="section-title">CÀI ĐẶT SỐ LƯỢNG</div>
+        <div class="config-container">
+          <div class="config-header">
+            <i class="fa fa-box"></i>
+            <span>Hàng hóa cần đếm</span>
+          </div>
+          <select id="bagTypeSelect" class="bag-type-select">
+            <option value="" disabled selected>Chọn loại hàng hóa</option>
+          </select>
+          
+          <div class="config-header">
+            <i class="fa fa-calculator"></i>
+            <span>SỐ LƯỢNG CẦN ĐẾM</span>
+          </div>
+          <div class="number-input-container">
+            <button class="num-btn" onclick="changeTarget(-1)"><i class="fa fa-minus"></i></button>
+            <input type="number" id="targetInput" min="1" value="250">
+            <button class="num-btn" onclick="changeTarget(1)"><i class="fa fa-plus"></i></button>
+          </div>
+
+          <div class="config-header">
+            <i class="fa fa-bell"></i>
+            <span>CẢNH BÁO GẦN XONG</span>
+          </div>
+          <div class="number-input-container">
+            <button class="num-btn" onclick="changeWarn(-1)"><i class="fa fa-minus"></i></button>
+            <input type="number" id="warnInput" min="1" value="10">
+            <button class="num-btn" onclick="changeWarn(1)"><i class="fa fa-plus"></i></button>
+          </div>
+
+          <button class="save-config-btn" onclick="saveConfig()">
+            <i class="fa fa-save"></i>
+            LƯU CẤU HÌNH
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+  <script src="script.js"></script>
+</body>
+</html>
