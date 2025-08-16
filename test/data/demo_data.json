@@ -1,0 +1,91 @@
+{
+  "products": [
+    {
+      "id": 1,
+      "code": "GAO001",
+      "name": "Gạo thường ST25"
+    },
+    {
+      "id": 2,
+      "code": "GAO002", 
+      "name": "Gạo thơm Jasmine"
+    },
+    {
+      "id": 3,
+      "code": "NGO001",
+      "name": "Ngô bắp vàng"
+    },
+    {
+      "id": 4,
+      "code": "LUA001",
+      "name": "Lúa mì cao cấp"
+    }
+  ],
+  "orders": [
+    {
+      "id": 1,
+      "orderNumber": 1,
+      "customerName": "Công ty TNHH ABC",
+      "orderCode": "DH20250115001",
+      "vehicleNumber": "51A-12345",
+      "product": {
+        "id": 1,
+        "code": "GAO001",
+        "name": "Gạo thường ST25"
+      },
+      "quantity": 100,
+      "warningQuantity": 10,
+      "currentCount": 0,
+      "status": "waiting",
+      "selected": false,
+      "createdAt": "2025-01-15T10:00:00Z"
+    },
+    {
+      "id": 2,
+      "orderNumber": 2,
+      "customerName": "Cửa hàng XYZ",
+      "orderCode": "DH20250115002",
+      "vehicleNumber": "59B-67890",
+      "product": {
+        "id": 2,
+        "code": "GAO002",
+        "name": "Gạo thơm Jasmine"
+      },
+      "quantity": 250,
+      "warningQuantity": 25,
+      "currentCount": 0,
+      "status": "waiting",
+      "selected": false,
+      "createdAt": "2025-01-15T10:30:00Z"
+    }
+  ],
+  "settings": {
+    "conveyorName": "BT-001",
+    "ipAddress": "192.168.1.200",
+    "gateway": "192.168.1.1",
+    "subnet": "255.255.255.0",
+    "sensorDelay": 50,
+    "autoReset": false,
+    "brightness": 35
+  },
+  "history": [
+    {
+      "orderCode": "DH20250114001",
+      "customerName": "Công ty DEF",
+      "productName": "Gạo thơm Jasmine",
+      "vehicleNumber": "61C-11111",
+      "count": 200,
+      "target": 200,
+      "timestamp": "2025-01-14T14:30:00Z"
+    },
+    {
+      "orderCode": "DH20250114002",
+      "customerName": "Siêu thị GHI",
+      "productName": "Ngô bắp vàng",
+      "vehicleNumber": "29A-22222",
+      "count": 150,
+      "target": 150,
+      "timestamp": "2025-01-14T16:45:00Z"
+    }
+  ]
+}

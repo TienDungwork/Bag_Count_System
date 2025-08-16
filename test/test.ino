@@ -1,13 +1,19 @@
 //>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>> Bag Counter Display
 #include "soc/soc.h"
 #include "soc/rtc_cntl_reg.h"
+#include <ESP32-HUB75-MatrixPanel-I2S-DMA.h>
 #include <WebServer_ESP32_SC_W5500.h>
+
+// Force use ESP32 WiFi library
+#ifdef ARDUINO_ARCH_ESP32
+  #include <WiFi.h>
+#endif
+
 #include <LittleFS.h>
 #include <ArduinoJson.h>
 #include <PubSubClient.h>
 #include <time.h>
 #include <vector>
-#include <ESP32-HUB75-MatrixPanel-I2S-DMA.h>
 #include <FS.h>
 #include <IRremote.h>
 
@@ -23,11 +29,35 @@
 // MAC address for W5500
 byte mac[] = { 0xDE, 0xAD, 0xBE, 0xEF, 0xFE, 0x01 };
 
+//----------------------------------------Network mode config
+enum NetworkMode {
+  ETHERNET_MODE,
+  WIFI_STA_MODE,
+  WIFI_AP_MODE
+};
+
+NetworkMode currentNetworkMode = ETHERNET_MODE;
+bool ethernetConnected = false;
+bool wifiConnected = false;
+
+//----------------------------------------WiFi config
+String wifi_ssid = "";
+String wifi_password = "";
+bool wifi_use_static_ip = false;
+IPAddress wifi_static_ip;
+IPAddress wifi_gateway;
+IPAddress wifi_subnet;
+IPAddress wifi_dns1;
+IPAddress wifi_dns2;
+
+const char* ap_ssid = "BagCounter_Config";
+const char* ap_password = "12345678";
+
 //----------------------------------------Network & MQTT config
 const char* mqtt_server = "test.mosquitto.org";
 
-//----------------------------------------IP tĩnh config
-IPAddress local_IP(192, 168, 1, 200);     // IP tĩnh
+//----------------------------------------IP tĩnh config (Ethernet)
+IPAddress local_IP(192, 168, 1, 200);     // IP tĩnh Ethernet
 IPAddress gateway(192, 168, 1, 1);      // Gateway router của bạn
 IPAddress subnet(255, 255, 255, 0);       // Subnet mask
 IPAddress primaryDNS(8, 8, 8, 8);         // DNS
@@ -54,10 +84,10 @@ PubSubClient mqtt(ethClient);
 #define CLK_PIN 15
 
 //----------------------------------------Sensor pin
-#define SENSOR_PIN 4 // Chân kết nối cảm biến E3F1-DS5C4
-#define TRIGGER_SENSOR_PIN 39  // Chân cảm biến khởi động
-#define START_LED_PIN 38  // Đèn báo bắt đầu đếm
-#define DONE_LED_PIN 5   // Đèn báo hoàn thành
+#define SENSOR_PIN 4 // Chân kết nối cảm biến t61
+#define TRIGGER_SENSOR_PIN 39  // Chân cảm biến encoder
+#define START_LED_PIN 38  // relay chạy bắt đầu đếm
+#define DONE_LED_PIN 5   // còi báo đến ngưỡng hoàn thành
 
 //----------------------------------------IR Remote pin
 #define RECV_PIN 1  // Chân nhận tín hiệu IR
@@ -121,7 +151,23 @@ unsigned long debounceIRTime = 200; // ms
 #define BAGTYPES_FILE "/bagtypes.json"
 #define BAGCONFIGS_FILE "/bagconfigs.json"
 
+//----------------------------------------Function declarations
+void updateStartLED();
+void updateDoneLED();
+void updateDisplay();
+void updateCount();
+String getTimeStr();
+
 //----------------------------------------IR Remote functions
+// Cấu hình từng loại - Di chuyển lên đây để sử dụng trong handleIRCommand
+struct BagConfig {
+  String type;
+  int target;
+  int warn;
+  String status; // WAIT, RUNNING, DONE
+};
+std::vector<BagConfig> bagConfigs;
+
 unsigned long mapIRButton(unsigned long code) {
   if (code == 0xFFA25D || code == 0xE318261B) return 1;  // Nút 1 - Start
   if (code == 0x511DBB || code == 0xFF629D) return 2;    // Nút 2 - Pause
@@ -133,12 +179,14 @@ void handleIRCommand(int button) {
   // Khai báo biến ở ngoài switch để tránh lỗi biên dịch
   DynamicJsonDocument doc(256);
   String msg;
+  String action = "";
   
   switch(button) {
     case 1: // Start
       Serial.println("IR Remote: Start command");
       isRunning = true;
       isTriggerEnabled = true;
+      action = "START";
       // Cập nhật thời gian bắt đầu khi Start
       if (time(nullptr) > 24 * 3600) {
         startTimeStr = getTimeStr();
@@ -150,35 +198,45 @@ void handleIRCommand(int button) {
         timeWaitingForSync = true;
         Serial.println("IR Remote - Time not synced yet, will update when available");
       }
+      // CAP NHAT NGAY LAP TUC TRANG THAI CHO TAT CA BAGCONFIG
+      Serial.print("IR Remote START - Updating ");
+      Serial.print(bagConfigs.size());
+      Serial.println(" bagConfigs to RUNNING");
+      
+      for (auto& cfg : bagConfigs) {
+        cfg.status = "RUNNING";  // Set TAT CA ve RUNNING
+        Serial.print("Updated ");
+        Serial.print(cfg.type);
+        Serial.println(" -> RUNNING");
+      }
+      saveBagConfigsToFile();
+      Serial.println("IR Remote - Config saved to file");
       updateStartLED();
       needUpdate = true;
-      // Publish MQTT để thông báo thay đổi
-      doc.clear();
-      doc["source"] = "IR_REMOTE";
-      doc["action"] = "START";
-      doc["status"] = "RUNNING";
-      doc["count"] = totalCount;
-      msg = "";
-      serializeJson(doc, msg);
-      mqtt.publish("bagcounter/ir_command", msg.c_str());
       break;
+      
     case 2: // Pause
       Serial.println("IR Remote: Pause command");
       isRunning = false;
       isTriggerEnabled = false;
       isCountingEnabled = false;
+      action = "PAUSE";
+      // CAP NHAT NGAY LAP TUC TRANG THAI CHO TAT CA BAGCONFIG
+      Serial.print("IR Remote PAUSE - Updating ");
+      Serial.print(bagConfigs.size());
+      Serial.println(" bagConfigs to PAUSE");
+      
+      for (auto& cfg : bagConfigs) {
+        cfg.status = "PAUSE";  // Set TAT CA ve PAUSE
+        Serial.print("Updated ");
+        Serial.print(cfg.type);
+        Serial.println(" -> PAUSE");
+      }
+      saveBagConfigsToFile();
       updateStartLED();
       needUpdate = true;
-      // Publish MQTT để thông báo thay đổi
-      doc.clear();
-      doc["source"] = "IR_REMOTE";
-      doc["action"] = "PAUSE";
-      doc["status"] = "STOPPED";
-      doc["count"] = totalCount;
-      msg = "";
-      serializeJson(doc, msg);
-      mqtt.publish("bagcounter/ir_command", msg.c_str());
       break;
+      
     case 3: // Reset
       Serial.println("IR Remote: Reset command");
       totalCount = 0;
@@ -189,30 +247,52 @@ void handleIRCommand(int button) {
       history.clear();
       startTimeStr = "";
       timeWaitingForSync = false;
+      action = "RESET";
+      // CAP NHAT NGAY LAP TUC TRANG THAI CHO TAT CA BAGCONFIG
+      Serial.print("IR Remote RESET - Updating ");
+      Serial.print(bagConfigs.size());
+      Serial.println(" bagConfigs to RESET");
+      
+      for (auto& cfg : bagConfigs) {
+        cfg.status = "RESET";  // Set TAT CA ve RESET
+        Serial.print("Updated ");
+        Serial.print(cfg.type);
+        Serial.println(" -> RESET");
+      }
+      saveBagConfigsToFile();
+      
+      // SAU KHI RESET, TỰ ĐỘNG CHUYỂN VỀ WAIT SAU MỘT CHÚT
+      Serial.println("Scheduling auto-transition to WAIT in 2 seconds...");
+      delay(100);  // Đợi web nhận được status RESET
+      
+      Serial.println("Auto-transitioning all bagConfigs to WAIT");
+      for (auto& cfg : bagConfigs) {
+        cfg.status = "WAIT";  // Set TAT CA ve WAIT
+        Serial.print("Updated ");
+        Serial.print(cfg.type);
+        Serial.println(" -> WAIT");
+      }
+      saveBagConfigsToFile();
       updateStartLED();
       updateDoneLED();
       needUpdate = true;
-      // Publish MQTT để thông báo thay đổi
-      doc.clear();
-      doc["source"] = "IR_REMOTE";
-      doc["action"] = "RESET";
-      doc["status"] = "STOPPED";
-      doc["count"] = totalCount;
-      msg = "";
-      serializeJson(doc, msg);
-      mqtt.publish("bagcounter/ir_command", msg.c_str());
       break;
   }
+  
+  // Publish MQTT để thông báo thay đổi
+  doc.clear();
+  doc["source"] = "IR_REMOTE";
+  doc["action"] = action;
+  doc["status"] = isRunning ? "RUNNING" : "STOPPED";
+  doc["count"] = totalCount;
+  doc["timestamp"] = millis();
+  doc["startTime"] = startTimeStr;
+  msg = "";
+  serializeJson(doc, msg);
+  mqtt.publish("bagcounter/ir_command", msg.c_str());
+  
+  Serial.println("IR Command processed: " + action);
 }
-
-// Cấu hình từng loại
-struct BagConfig {
-  String type;
-  int target;
-  int warn;
-  String status; // WAIT, RUNNING, DONE
-};
-std::vector<BagConfig> bagConfigs;
 
 //------------------- Lưu/đọc loại bao -------------------
 void saveBagTypesToFile() {
@@ -270,27 +350,236 @@ void loadBagConfigsFromFile() {
   f.close();
 }
 
-//----------------------------------------Ethernet, MQTT, Time
-void setupEthernet() {
-  Serial.println("Initializing W5500 Ethernet...");
+//------------------- Lưu/đọc cài đặt chung -------------------
+void loadSettingsFromFile() {
+  if (LittleFS.exists("/settings.json")) {
+    File file = LittleFS.open("/settings.json", "r");
+    if (file) {
+      String content = file.readString();
+      file.close();
+      
+      DynamicJsonDocument doc(1024);
+      if (deserializeJson(doc, content) == DeserializationError::Ok) {
+        // Load Ethernet IP config
+        String ethIP = doc["ipAddress"];
+        String ethGateway = doc["gateway"];
+        String ethSubnet = doc["subnet"];
+        String ethDNS1 = doc["dns1"];
+        String ethDNS2 = doc["dns2"];
+        
+        if (ethIP.length() > 0) {
+          IPAddress newIP, newGateway, newSubnet, newDNS1, newDNS2;
+          if (newIP.fromString(ethIP)) local_IP = newIP;
+          if (newGateway.fromString(ethGateway)) gateway = newGateway;
+          if (newSubnet.fromString(ethSubnet)) subnet = newSubnet;
+          if (newDNS1.fromString(ethDNS1)) primaryDNS = newDNS1;
+          if (newDNS2.fromString(ethDNS2)) secondaryDNS = newDNS2;
+          
+          Serial.println("Loaded Ethernet config from file:");
+          Serial.println("IP: " + ethIP);
+          Serial.println("Gateway: " + ethGateway);
+          Serial.println("Subnet: " + ethSubnet);
+        }
+        
+        // Load other settings
+        if (doc.containsKey("brightness")) {
+          int brightness = doc["brightness"];
+          if (brightness >= 10 && brightness <= 100) {
+            // Brightness sẽ được set sau khi display init
+          }
+        }
+      }
+    }
+  }
+}
+
+//----------------------------------------Network Setup Functions
+void loadWiFiConfig() {
+  // Set default values first
+  wifi_static_ip = IPAddress(192, 168, 1, 201);  // Default static IP
+  wifi_gateway = IPAddress(192, 168, 1, 1);      // Default gateway
+  wifi_subnet = IPAddress(255, 255, 255, 0);     // Default subnet
+  wifi_dns1 = IPAddress(8, 8, 8, 8);             // Google DNS
+  wifi_dns2 = IPAddress(8, 8, 4, 4);             // Google DNS backup
   
-  // To be called before ETH.begin()
-  ESP32_W5500_onEvent();
+  if (LittleFS.exists("/wifi_config.json")) {
+    File file = LittleFS.open("/wifi_config.json", "r");
+    if (file) {
+      String content = file.readString();
+      file.close();
+      
+      DynamicJsonDocument doc(1024);
+      if (deserializeJson(doc, content) == DeserializationError::Ok) {
+        wifi_ssid = doc["ssid"].as<String>();
+        wifi_password = doc["password"].as<String>();
+        wifi_use_static_ip = doc["use_static_ip"] | false;
+        
+        if (wifi_use_static_ip) {
+          String ip_str = doc["static_ip"];
+          String gateway_str = doc["gateway"];
+          String subnet_str = doc["subnet"];
+          String dns1_str = doc["dns1"];
+          String dns2_str = doc["dns2"];
+          
+          // Only override defaults if valid values are provided
+          if (ip_str.length() > 0) wifi_static_ip.fromString(ip_str);
+          if (gateway_str.length() > 0) wifi_gateway.fromString(gateway_str);
+          if (subnet_str.length() > 0) wifi_subnet.fromString(subnet_str);
+          if (dns1_str.length() > 0) wifi_dns1.fromString(dns1_str);
+          if (dns2_str.length() > 0) wifi_dns2.fromString(dns2_str);
+        }
+        
+        Serial.println("WiFi config loaded: " + wifi_ssid);
+        if (wifi_use_static_ip) {
+          Serial.println("Static IP: " + wifi_static_ip.toString());
+          Serial.println("Gateway: " + wifi_gateway.toString());
+          Serial.println("Subnet: " + wifi_subnet.toString());
+        }
+      }
+    }
+  } else {
+    Serial.println("No WiFi config found, using defaults");
+  }
+}
+
+void saveWiFiConfig(String ssid, String password, bool useStaticIP = false, 
+                   String staticIP = "", String gateway = "", String subnet = "",
+                   String dns1 = "", String dns2 = "") {
+  DynamicJsonDocument doc(1024);
+  doc["ssid"] = ssid;
+  doc["password"] = password;
+  doc["use_static_ip"] = useStaticIP;
   
-  // Initialize W5500 with static IP
-  ETH.begin(MISO_GPIO, MOSI_GPIO, SCK_GPIO, CS_GPIO, INT_GPIO, SPI_CLOCK_MHZ, ETH_SPI_HOST, mac);
-  ETH.config(local_IP, gateway, subnet, primaryDNS, secondaryDNS);
+  if (useStaticIP) {
+    doc["static_ip"] = staticIP;
+    doc["gateway"] = gateway;
+    doc["subnet"] = subnet;
+    doc["dns1"] = dns1;
+    doc["dns2"] = dns2;
+  }
   
-  // Wait for connection
-  ESP32_W5500_waitForConnect();
+  File file = LittleFS.open("/wifi_config.json", "w");
+  if (file) {
+    serializeJson(doc, file);
+    file.close();
+    Serial.println("WiFi config saved");
+  }
+}
+
+bool setupEthernet() {
+  Serial.println("Trying Ethernet connection...");
   
-  Serial.println("W5500 Ethernet connected!");
-  Serial.print("IP address: ");
-  Serial.println(ETH.localIP());
-  Serial.print("Gateway: ");
-  Serial.println(gateway);
-  Serial.print("Subnet: ");
-  Serial.println(subnet);
+  try {
+    // To be called before ETH.begin()
+    ESP32_W5500_onEvent();
+    
+    // Initialize W5500 with static IP
+    ETH.begin(MISO_GPIO, MOSI_GPIO, SCK_GPIO, CS_GPIO, INT_GPIO, SPI_CLOCK_MHZ, ETH_SPI_HOST, mac);
+    ETH.config(local_IP, gateway, subnet, primaryDNS, secondaryDNS);
+    
+    // Wait for connection with timeout
+    unsigned long startTime = millis();
+    while (!ESP32_W5500_isConnected() && millis() - startTime < 10000) {
+      delay(100);
+    }
+    
+    if (ESP32_W5500_isConnected()) {
+      ethernetConnected = true;
+      currentNetworkMode = ETHERNET_MODE;
+      Serial.println("Ethernet connected!");
+      Serial.print("IP: ");
+      Serial.println(ETH.localIP());
+      return true;
+    }
+  } catch (...) {
+    Serial.println("Ethernet initialization failed");
+  }
+  
+  ethernetConnected = false;
+  return false;
+}
+
+bool setupWiFiSTA() {
+  if (wifi_ssid.length() == 0) {
+    Serial.println("No WiFi credentials found");
+    return false;
+  }
+  
+  Serial.println("Trying WiFi connection to: " + wifi_ssid);
+  WiFi.mode(WIFI_STA);
+  
+  // Configure static IP if enabled
+  if (wifi_use_static_ip) {
+    Serial.println("Using static IP: " + wifi_static_ip.toString());
+    if (!WiFi.config(wifi_static_ip, wifi_gateway, wifi_subnet, wifi_dns1, wifi_dns2)) {
+      Serial.println("Failed to configure static IP");
+      return false;
+    }
+  }
+  
+  WiFi.begin(wifi_ssid.c_str(), wifi_password.c_str());
+  
+  unsigned long startTime = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - startTime < 15000) {
+    delay(500);
+    Serial.print(".");
+  }
+  
+  if (WiFi.status() == WL_CONNECTED) {
+    wifiConnected = true;
+    currentNetworkMode = WIFI_STA_MODE;
+    Serial.println();
+    Serial.println("WiFi connected!");
+    Serial.print("IP: ");
+    Serial.println(WiFi.localIP());
+    Serial.print("Gateway: ");
+    Serial.println(WiFi.gatewayIP());
+    Serial.print("Subnet: ");
+    Serial.println(WiFi.subnetMask());
+    return true;
+  }
+  
+  Serial.println();
+  Serial.println("WiFi connection failed");
+  wifiConnected = false;
+  return false;
+}
+
+void setupWiFiAP() {
+  Serial.println("Starting WiFi Access Point mode...");
+  WiFi.mode(WIFI_AP);
+  WiFi.softAP(ap_ssid, ap_password);
+  
+  IPAddress apIP = WiFi.softAPIP();
+  currentNetworkMode = WIFI_AP_MODE;
+  
+  Serial.println("Access Point started!");
+  Serial.print("AP SSID: ");
+  Serial.println(ap_ssid);
+  Serial.print("AP Password: ");
+  Serial.println(ap_password);
+  Serial.print("AP IP: ");
+  Serial.println(apIP);
+}
+
+void setupNetwork() {
+  loadWiFiConfig();
+  
+  // Try Ethernet first
+  if (setupEthernet()) {
+    Serial.println("Using Ethernet connection");
+    return;
+  }
+  
+  // Try WiFi STA if Ethernet fails
+  if (setupWiFiSTA()) {
+    Serial.println("Using WiFi STA connection");
+    return;
+  }
+  
+  // Fallback to AP mode
+  setupWiFiAP();
+  Serial.println("Using WiFi AP mode for configuration");
 }
 
 void setupMQTT() {
@@ -372,21 +661,81 @@ void setupWebServer() {
     }
   });
   
-  // API trạng thái hiện tại
+  // API trạng thái hiện tại - Real-time polling
   server.on("/api/status", HTTP_GET, [](){
-    DynamicJsonDocument doc(256);
-    doc["status"] = isRunning ? "RUNNING" : "STOPPED";
+    server.sendHeader("Access-Control-Allow-Origin", "*");
+    server.sendHeader("Cache-Control", "no-cache, no-store, must-revalidate");
+    
+    DynamicJsonDocument doc(512);
+    
+    // TRẢ VỀ STATUS ĐÚNG THEO TRẠNG THÁI THỰC TẾ CỦA HỆ THỐNG
+    String currentStatus = "WAIT";  // Default
+    
+    // Nếu đang chạy thì trả về RUNNING
+    if (isRunning) {
+      currentStatus = "RUNNING";
+    } else {
+      // Kiểm tra status từ bagConfigs - lấy status đầu tiên khác WAIT
+      for (auto& cfg : bagConfigs) {
+        if (cfg.status != "WAIT") {
+          currentStatus = cfg.status;  // PAUSE, RESET, DONE
+          break;
+        }
+      }
+      
+      // Fallback: kiểm tra bagType hiện tại
+      if (currentStatus == "WAIT") {
+        for (auto& cfg : bagConfigs) {
+          if (cfg.type == bagType) {
+            currentStatus = cfg.status;
+            break;
+          }
+        }
+      }
+    }
+    
+    Serial.print("API Status returning: ");
+    Serial.print(currentStatus);
+    Serial.print(" (isRunning: ");
+    Serial.print(isRunning);
+    Serial.print(", bagType: ");
+    Serial.print(bagType);
+    Serial.println(")");
+    
+    doc["status"] = currentStatus;  // Trả về đúng format cho web
     doc["count"] = totalCount;
     doc["startTime"] = startTimeStr;
     doc["currentType"] = bagType;
     doc["target"] = targetCount;
     doc["isWarning"] = false;
+    doc["timestamp"] = millis();
+    doc["sensorEnabled"] = isCountingEnabled;
+    doc["triggerEnabled"] = isTriggerEnabled;
+    doc["limitReached"] = isLimitReached;
+    doc["currentTime"] = getTimeStr();
     
-    // Kiểm tra ngưỡng cảnh báo
+    // Thêm tên băng tải từ settings
+    if (LittleFS.exists("/settings.json")) {
+      File file = LittleFS.open("/settings.json", "r");
+      if (file) {
+        String content = file.readString();
+        file.close();
+        DynamicJsonDocument settingsDoc(1024);
+        if (deserializeJson(settingsDoc, content) == DeserializationError::Ok) {
+          if (settingsDoc.containsKey("conveyorName")) {
+            doc["conveyorName"] = settingsDoc["conveyorName"].as<String>();
+          }
+        }
+      }
+    }
+    
+    // Thêm trạng thái bagConfig hiện tại để web sync được
     for (auto& cfg : bagConfigs) {
       if (cfg.type == bagType) {
+        doc["bagConfigStatus"] = cfg.status;  // WAIT, RUNNING, DONE
         int warningThreshold = cfg.target - cfg.warn;
         doc["isWarning"] = (totalCount >= warningThreshold);
+        doc["warningThreshold"] = warningThreshold;
         break;
       }
     }
@@ -396,13 +745,26 @@ void setupWebServer() {
     server.send(200, "application/json", out);
   });
 
-  // API kiểm tra thay đổi từ IR Remote
+  // API kiểm tra thay đổi từ IR Remote - Real-time để web poll
   server.on("/api/ir_status", HTTP_GET, [](){
-    DynamicJsonDocument doc(256);
+    server.sendHeader("Access-Control-Allow-Origin", "*");
+    server.sendHeader("Cache-Control", "no-cache, no-store, must-revalidate");
+    
+    DynamicJsonDocument doc(512);
     doc["lastIRCommand"] = "";  // Có thể thêm biến để track lệnh IR cuối
     doc["status"] = isRunning ? "RUNNING" : "STOPPED";
     doc["count"] = totalCount;
     doc["timestamp"] = millis();
+    doc["sensorEnabled"] = isCountingEnabled;
+    doc["triggerEnabled"] = isTriggerEnabled;
+    doc["limitReached"] = isLimitReached;
+    doc["startTime"] = startTimeStr;
+    doc["currentType"] = bagType;
+    doc["target"] = targetCount;
+    
+    // Trạng thái LED
+    doc["startLedOn"] = startLedOn;
+    doc["doneLedOn"] = doneLedOn;
     
     String out;
     serializeJson(doc, out);
@@ -474,7 +836,14 @@ void setupWebServer() {
       String cmd = doc["cmd"];
       
       if (cmd == "start") {
-        Serial.println("Start command received");
+        Serial.println("Web Start command received");
+        Serial.print("Trang thai truoc - isRunning: ");
+        Serial.print(isRunning);
+        Serial.print(", isTriggerEnabled: ");
+        Serial.print(isTriggerEnabled);
+        Serial.print(", isCountingEnabled: ");
+        Serial.println(isCountingEnabled);
+        
         isRunning = true;
         isTriggerEnabled = true;
         // Cập nhật thời gian bắt đầu khi Start
@@ -485,13 +854,40 @@ void setupWebServer() {
           startTimeStr = "Waiting for time sync...";
           timeWaitingForSync = true;
         }
+        
+        // CẬP NHẬT STATUS TRONG BAGCONFIGS
+        for (auto& cfg : bagConfigs) {
+          if (cfg.type == bagType) {
+            cfg.status = "RUNNING";
+            break;
+          }
+        }
+        saveBagConfigsToFile();
+        
         updateStartLED();
         needUpdate = true;
+        
+        Serial.print("Trang thai sau - isRunning: ");
+        Serial.print(isRunning);
+        Serial.print(", isTriggerEnabled: ");
+        Serial.print(isTriggerEnabled);
+        Serial.print(", isCountingEnabled: ");
+        Serial.println(isCountingEnabled);
       } else if (cmd == "pause") {
         Serial.println("Pause command received");
         isRunning = false;
         isTriggerEnabled = false;
         isCountingEnabled = false;
+        
+        // CẬP NHẬT STATUS TRONG BAGCONFIGS
+        for (auto& cfg : bagConfigs) {
+          if (cfg.type == bagType) {
+            cfg.status = "PAUSE";
+            break;
+          }
+        }
+        saveBagConfigsToFile();
+        
         updateStartLED();
         needUpdate = true;
       } else if (cmd == "reset") {
@@ -504,15 +900,193 @@ void setupWebServer() {
         history.clear();
         startTimeStr = "";
         timeWaitingForSync = false;
+        
+        // CẬP NHẬT STATUS TRONG BAGCONFIGS
+        for (auto& cfg : bagConfigs) {
+          if (cfg.type == bagType) {
+            cfg.status = "RESET";
+            break;
+          }
+        }
+        saveBagConfigsToFile();
+        
+        // SAU KHI RESET, TỰ ĐỘNG CHUYỂN VỀ WAIT SAU 2 GIÂY
+        delay(100);  // Đợi web nhận được status RESET
+        for (auto& cfg : bagConfigs) {
+          if (cfg.type == bagType) {
+            cfg.status = "WAIT";
+            break;
+          }
+        }
+        saveBagConfigsToFile();
+        
         updateStartLED();
         updateDoneLED();
         needUpdate = true;
+      } else if (cmd == "reset_count_only") {
+        Serial.println("Reset count only command received");
+        // CHỈ RESET COUNT, KHÔNG THAY ĐỔI TRẠNG THÁI KHÁC
+        totalCount = 0;
+        isLimitReached = false;
+        history.clear();
+        
+        // GIỮ NGUYÊN TRẠNG THÁI isRunning, isTriggerEnabled
+        // CHỈ CẬP NHẬT COUNT DISPLAY
+        updateDoneLED();
+        needUpdate = true;
+        
+        Serial.println("Count reset to 0, keeping current running state");
+      } else if (cmd == "set_current_order") {
+        // Cập nhật thông tin đơn hàng hiện tại để hiển thị trên LED
+        String productName = doc["productName"];
+        String customerName = doc["customerName"];
+        String orderCode = doc["orderCode"];
+        int target = doc["target"] | 20;
+        int warningQuantity = doc["warningQuantity"] | 5;
+        bool keepCount = doc["keepCount"] | false;
+        bool isRunningOrder = doc["isRunning"] | false;
+        
+        Serial.println("Setting current order:");
+        Serial.println("Product: " + productName);
+        Serial.println("Customer: " + customerName);
+        Serial.println("Order Code: " + orderCode);
+        Serial.println("Target: " + String(target));
+        Serial.println("Warning: " + String(warningQuantity));
+        Serial.println("Keep Count: " + String(keepCount));
+        Serial.println("Is Running: " + String(isRunningOrder));
+        
+        // Cập nhật biến hiển thị
+        bagType = productName;
+        targetCount = target;
+        
+        // KHÔNG RESET COUNT NẾU keepCount = true (cho multi-order)
+        if (!keepCount) {
+          totalCount = 0;
+          isLimitReached = false;
+        }
+        
+        // ĐẶT TRẠNG THÁI RUNNING NẾU isRunning = true
+        if (isRunningOrder) {
+          isRunning = true;
+          isTriggerEnabled = true;
+          Serial.println("Set running state to RUNNING");
+        }
+        
+        // Tìm và cập nhật bagConfig
+        bool found = false;
+        for (auto& cfg : bagConfigs) {
+          if (cfg.type == productName) {
+            cfg.target = target;
+            cfg.warn = warningQuantity;
+            if (isRunningOrder) {
+              cfg.status = "RUNNING";
+            }
+            found = true;
+            break;
+          }
+        }
+        
+        // Tạo mới nếu không tìm thấy
+        if (!found) {
+          BagConfig newCfg;
+          newCfg.type = productName;
+          newCfg.target = target;
+          newCfg.warn = warningQuantity;
+          newCfg.status = isRunningOrder ? "RUNNING" : "WAIT";
+          bagConfigs.push_back(newCfg);
+        }
+        
+        saveBagConfigsToFile();
+        needUpdate = true;
+        
+        Serial.println("Current order updated successfully");
+      } else if (cmd == "next_order") {
+        // 🔄 XỬ LÝ CHUYỂN SANG ĐƠN HÀNG TIẾP THEO
+        Serial.println("Next order command received");
+        
+        String productName = doc["productName"];
+        String customerName = doc["customerName"];
+        String orderCode = doc["orderCode"];
+        int target = doc["target"] | 20;
+        int warningQuantity = doc["warningQuantity"] | 5;
+        bool keepCount = doc["keepCount"] | false;
+        
+        Serial.println("Switching to next order:");
+        Serial.println("Product: " + productName);
+        Serial.println("Customer: " + customerName);
+        Serial.println("Order Code: " + orderCode);
+        Serial.println("Target: " + String(target));
+        Serial.println("Keep Count: " + String(keepCount));
+        
+        // CẬP NHẬT THÔNG TIN ĐƠN HÀNG MỚI
+        bagType = productName;
+        targetCount = target;
+        
+        // KHÔNG RESET COUNT NẾU keepCount = true (để tiếp tục đếm multi-order)
+        if (!keepCount) {
+          totalCount = 0;
+          isLimitReached = false;
+        }
+        
+        // ĐẢM BẢO TRẠNG THÁI VẪN ĐANG CHẠY
+        isRunning = true;
+        isTriggerEnabled = true;
+        // isCountingEnabled sẽ được set khi cảm biến kích hoạt
+        
+        // TÌM VÀ CẬP NHẬT BAGCONFIG
+        bool found = false;
+        for (auto& cfg : bagConfigs) {
+          if (cfg.type == productName) {
+            cfg.target = target;
+            cfg.warn = warningQuantity;
+            cfg.status = "RUNNING";  // ✅ ĐẢM BẢO TRẠNG THÁI RUNNING
+            found = true;
+            Serial.println("✅ Updated existing bagConfig to RUNNING");
+            break;
+          }
+        }
+        
+        // TẠO MỚI NẾU KHÔNG TÌM THẤY
+        if (!found) {
+          BagConfig newCfg;
+          newCfg.type = productName;
+          newCfg.target = target;
+          newCfg.warn = warningQuantity;
+          newCfg.status = "RUNNING";
+          bagConfigs.push_back(newCfg);
+          Serial.println("✅ Created new bagConfig with RUNNING status");
+        }
+        
+        // ✅ QUAN TRỌNG: CẬP NHẬT TẤT CẢ BAGCONFIG CỦA CÙNG LOẠI SẢN PHẨM
+        // Để đảm bảo /api/status trả về đúng
+        for (auto& cfg : bagConfigs) {
+          if (cfg.type == bagType) {  // bagType hiện tại đang active
+            cfg.status = "RUNNING";
+            Serial.println("✅ Updated current bagType status to RUNNING");
+            break;
+          }
+        }
+        
+        saveBagConfigsToFile();
+        updateStartLED();
+        needUpdate = true;
+        
+        Serial.println("✅ Next order setup completed - Status: RUNNING");
       } else if (cmd == "select") {
         String type = doc["type"];
+        int target = doc["target"] | 20;
+        int warn = doc["warn"] | 10;
+        String orderCode = doc["orderCode"];
+        
+        // Cập nhật hoặc tạo mới bagConfig cho đơn hàng này
+        bool found = false;
         for (auto& cfg : bagConfigs) {
-          if (cfg.type == type) {
+          if (cfg.type == type || (orderCode.length() > 0 && cfg.type.indexOf(orderCode) >= 0)) {
             bagType = cfg.type;
-            targetCount = cfg.target;
+            targetCount = target > 0 ? target : cfg.target;
+            found = true;
+            
+            // Reset trạng thái cho đơn hàng mới
             isRunning = false;
             isTriggerEnabled = false;
             isCountingEnabled = false;
@@ -525,15 +1099,64 @@ void setupWebServer() {
             timeWaitingForSync = false;
             updateStartLED();
             updateDoneLED();
-            // Đánh dấu trạng thái RUNNING cho loại này, các loại khác là WAIT hoặc DONE
-            for (auto& c : bagConfigs) {
-              if (c.type == type) c.status = "RUNNING";
-              else if (c.status != "DONE") c.status = "WAIT";
-            }
-            saveBagConfigsToFile();
-            needUpdate = true;
+            
+            // Cập nhật trạng thái
+            cfg.status = "RUNNING";
             break;
           }
+        }
+        
+        if (!found && type.length() > 0) {
+          // Tạo mới nếu không tìm thấy
+          BagConfig newCfg;
+          newCfg.type = type;
+          newCfg.target = target;
+          newCfg.warn = warn;
+          newCfg.status = "RUNNING";
+          bagConfigs.push_back(newCfg);
+          
+          bagType = type;
+          targetCount = target;
+          
+          // Reset trạng thái
+          isRunning = false;
+          isTriggerEnabled = false;
+          isCountingEnabled = false;
+          isLimitReached = false;
+          totalCount = 0;
+          finishedBlinking = false;
+          blinkCount = 0;
+          isBlinking = false;
+          startTimeStr = "";
+          timeWaitingForSync = false;
+          updateStartLED();
+          updateDoneLED();
+        }
+        
+        // Đánh dấu các loại khác là WAIT hoặc giữ nguyên DONE
+        for (auto& c : bagConfigs) {
+          if (c.type != bagType && c.status != "DONE") {
+            c.status = "WAIT";
+          }
+        }
+        
+        saveBagConfigsToFile();
+        needUpdate = true;
+        
+        Serial.println("Order selected: " + bagType);
+        Serial.println("Target: " + String(targetCount));
+        Serial.println("Warning: " + String(warn));
+      } else if (cmd == "REMOTE") {
+        String button = doc["button"];
+        Serial.println("Remote command received: " + button);
+        
+        // Xử lý các lệnh remote với function handleIRCommand
+        if (button == "START") {
+          handleIRCommand(1);  // Nút 1 - Start
+        } else if (button == "STOP") {
+          handleIRCommand(2);  // Nút 2 - Pause  
+        } else if (button == "RESET") {
+          handleIRCommand(3);  // Nút 3 - Reset
         }
       }
     }
@@ -626,6 +1249,618 @@ void setupWebServer() {
       }
     }
     server.send(200, "text/plain", "OK");
+  });
+
+  // API cho sản phẩm
+  server.on("/api/products", HTTP_GET, [](){
+    // Trả về danh sách sản phẩm từ LittleFS hoặc cơ sở dữ liệu
+    DynamicJsonDocument doc(2048);
+    JsonArray arr = doc.to<JsonArray>();
+    
+    // Tạm thời trả về dữ liệu mẫu - sau này có thể lưu vào file
+    JsonObject product1 = arr.createNestedObject();
+    product1["id"] = 1;
+    product1["code"] = "GAO001";
+    product1["name"] = "Gạo thường";
+    
+    JsonObject product2 = arr.createNestedObject();
+    product2["id"] = 2;
+    product2["code"] = "GAO002";
+    product2["name"] = "Gạo thơm";
+    
+    JsonObject product3 = arr.createNestedObject();
+    product3["id"] = 3;
+    product3["code"] = "NGO001";
+    product3["name"] = "Ngô";
+    
+    String out;
+    serializeJson(doc, out);
+    server.send(200, "application/json", out);
+  });
+
+  server.on("/api/products", HTTP_POST, [](){
+    if (server.hasArg("plain")) {
+      DynamicJsonDocument doc(256);
+      deserializeJson(doc, server.arg("plain"));
+      String code = doc["code"];
+      String name = doc["name"];
+      
+      // Lưu sản phẩm mới vào file hoặc cơ sở dữ liệu
+      // Tạm thời chỉ trả về OK
+      Serial.println("New product added: " + code + " - " + name);
+    }
+    server.send(200, "text/plain", "OK");
+  });
+
+  server.on("/api/products", HTTP_DELETE, [](){
+    server.sendHeader("Access-Control-Allow-Origin", "*");
+    
+    if (server.hasArg("id")) {
+      String productId = server.arg("id");
+      Serial.println("Delete product ID: " + productId);
+      server.send(200, "application/json", "{\"status\":\"OK\",\"message\":\"Product deleted\"}");
+    } else {
+      server.send(400, "application/json", "{\"status\":\"Error\",\"message\":\"Missing product ID\"}");
+    }
+  });
+
+  // API xóa đơn hàng
+  server.on("/api/orders", HTTP_DELETE, [](){
+    server.sendHeader("Access-Control-Allow-Origin", "*");
+    
+    if (server.hasArg("orderCode")) {
+      String orderCode = server.arg("orderCode");
+      
+      // Tìm và xóa khỏi bagConfigs
+      bagConfigs.erase(
+        std::remove_if(bagConfigs.begin(), bagConfigs.end(),
+          [&orderCode](const BagConfig& cfg) { 
+            return cfg.type.indexOf(orderCode) >= 0; 
+          }),
+        bagConfigs.end()
+      );
+      
+      // Lưu thay đổi
+      saveBagConfigsToFile();
+      
+      Serial.println("Order deleted: " + orderCode);
+      server.send(200, "application/json", "{\"status\":\"OK\",\"message\":\"Order deleted from ESP32\"}");
+    } else {
+      server.send(400, "application/json", "{\"status\":\"Error\",\"message\":\"Missing order code\"}");
+    }
+  });
+
+  // API cho đơn hàng
+  server.on("/api/new_orders", HTTP_GET, [](){
+    // Trả về danh sách đơn hàng
+    DynamicJsonDocument doc(4096);
+    JsonArray arr = doc.to<JsonArray>();
+    
+    // Tạm thời trả về dữ liệu mẫu
+    JsonObject order1 = arr.createNestedObject();
+    order1["id"] = 1;
+    order1["orderNumber"] = 1;
+    order1["customerName"] = "Công ty ABC";
+    order1["orderCode"] = "DH001";
+    order1["vehicleNumber"] = "51A-12345";
+    order1["productName"] = "Gạo thường";
+    order1["quantity"] = 100;
+    order1["currentCount"] = 0;
+    order1["status"] = "waiting";
+    order1["selected"] = false;
+    
+    String out;
+    serializeJson(doc, out);
+    server.send(200, "application/json", out);
+  });
+
+  server.on("/api/new_orders", HTTP_POST, [](){
+    server.sendHeader("Access-Control-Allow-Origin", "*");
+    
+    if (server.hasArg("plain")) {
+      DynamicJsonDocument doc(512);
+      deserializeJson(doc, server.arg("plain"));
+      
+      String customerName = doc["customerName"];
+      String orderCode = doc["orderCode"];
+      String vehicleNumber = doc["vehicleNumber"];
+      String productName = doc["productName"];
+      int quantity = doc["quantity"];
+      int warningQuantity = doc["warningQuantity"];
+      
+      // Tạo BagConfig mới từ đơn hàng
+      BagConfig newConfig;
+      newConfig.type = productName;
+      newConfig.target = quantity;
+      newConfig.warn = warningQuantity;
+      newConfig.status = "WAIT";
+      
+      // Kiểm tra và thêm vào bagConfigs nếu chưa có
+      bool found = false;
+      for (auto& cfg : bagConfigs) {
+        if (cfg.type == productName) {
+          cfg.target = quantity;
+          cfg.warn = warningQuantity;
+          cfg.status = "WAIT";
+          found = true;
+          break;
+        }
+      }
+      
+      if (!found) {
+        bagConfigs.push_back(newConfig);
+      }
+      
+      // Thêm vào bagTypes nếu chưa có
+      if (std::find(bagTypes.begin(), bagTypes.end(), productName) == bagTypes.end()) {
+        bagTypes.push_back(productName);
+        saveBagTypesToFile();
+      }
+      
+      // Lưu cấu hình
+      saveBagConfigsToFile();
+      
+      Serial.println("New order saved to ESP32:");
+      Serial.println("Customer: " + customerName);
+      Serial.println("Order Code: " + orderCode);
+      Serial.println("Vehicle: " + vehicleNumber);
+      Serial.println("Product: " + productName);
+      Serial.println("Quantity: " + String(quantity));
+      Serial.println("Warning: " + String(warningQuantity));
+      
+      server.send(200, "application/json", "{\"status\":\"OK\",\"message\":\"Order saved to ESP32\"}");
+    } else {
+      server.send(400, "application/json", "{\"status\":\"Error\",\"message\":\"No data provided\"}");
+    }
+  });
+
+  // API cài đặt chung - Cập nhật để lưu vào ESP32
+  server.on("/api/settings", HTTP_GET, [](){
+    server.sendHeader("Access-Control-Allow-Origin", "*");
+    
+    DynamicJsonDocument doc(1024);
+    
+    // Load từ file hoặc giá trị mặc định
+    if (LittleFS.exists("/settings.json")) {
+      File file = LittleFS.open("/settings.json", "r");
+      if (file) {
+        String content = file.readString();
+        file.close();
+        deserializeJson(doc, content);
+      }
+    }
+    
+    // Đặt giá trị mặc định nếu chưa có
+    if (!doc.containsKey("conveyorName")) doc["conveyorName"] = "BT-001";
+    if (!doc.containsKey("ipAddress")) doc["ipAddress"] = ETH.localIP().toString();
+    if (!doc.containsKey("gateway")) doc["gateway"] = gateway.toString();
+    if (!doc.containsKey("subnet")) doc["subnet"] = subnet.toString();
+    if (!doc.containsKey("sensorDelay")) doc["sensorDelay"] = 50;
+    if (!doc.containsKey("bagDetectionDelay")) doc["bagDetectionDelay"] = 200;
+    if (!doc.containsKey("minBagInterval")) doc["minBagInterval"] = 100;
+    if (!doc.containsKey("autoReset")) doc["autoReset"] = false;
+    if (!doc.containsKey("brightness")) doc["brightness"] = 35;
+    
+    String out;
+    serializeJson(doc, out);
+    server.send(200, "application/json", out);
+  });
+
+  server.on("/api/settings", HTTP_POST, [](){
+    server.sendHeader("Access-Control-Allow-Origin", "*");
+    
+    if (server.hasArg("plain")) {
+      DynamicJsonDocument doc(1024);
+      deserializeJson(doc, server.arg("plain"));
+      
+      String conveyorName = doc["conveyorName"];
+      int brightness = doc["brightness"];
+      int sensorDelay = doc["sensorDelay"];
+      int bagDetectionDelay = doc["bagDetectionDelay"];
+      int minBagInterval = doc["minBagInterval"];
+      bool autoReset = doc["autoReset"];
+      
+      // Cấu hình IP tĩnh Ethernet
+      String ethIP = doc["ipAddress"];
+      String ethGateway = doc["gateway"];
+      String ethSubnet = doc["subnet"];
+      String ethDNS1 = doc["dns1"];
+      String ethDNS2 = doc["dns2"];
+      
+      // Cập nhật cài đặt
+      if (brightness >= 10 && brightness <= 100) {
+        dma_display->setBrightness8(map(brightness, 0, 100, 0, 255));
+      }
+      
+      // Cập nhật IP tĩnh Ethernet nếu có thay đổi
+      bool needRestart = false;
+      if (ethIP.length() > 0 && ethGateway.length() > 0 && ethSubnet.length() > 0) {
+        IPAddress newIP, newGateway, newSubnet, newDNS1, newDNS2;
+        if (newIP.fromString(ethIP) && newGateway.fromString(ethGateway) && newSubnet.fromString(ethSubnet)) {
+          // Kiểm tra xem có thay đổi không
+          if (local_IP != newIP || gateway != newGateway || subnet != newSubnet) {
+            local_IP = newIP;
+            gateway = newGateway; 
+            subnet = newSubnet;
+            needRestart = true;
+            
+            Serial.println("IP configuration changed:");
+            Serial.println("New IP: " + ethIP);
+            Serial.println("New Gateway: " + ethGateway);
+            Serial.println("New Subnet: " + ethSubnet);
+          }
+          
+          if (ethDNS1.length() > 0) newDNS1.fromString(ethDNS1);
+          else newDNS1 = IPAddress(8, 8, 8, 8);
+          
+          if (ethDNS2.length() > 0) newDNS2.fromString(ethDNS2);
+          else newDNS2 = IPAddress(8, 8, 4, 4);
+          
+          primaryDNS = newDNS1;
+          secondaryDNS = newDNS2;
+        }
+      }
+      
+      // Lưu cài đặt vào file
+      File file = LittleFS.open("/settings.json", "w");
+      if (file) {
+        serializeJson(doc, file);
+        file.close();
+        Serial.println("Settings saved to file");
+      }
+      
+      Serial.println("Settings updated:");
+      Serial.println("Conveyor Name: " + conveyorName);
+      Serial.println("Brightness: " + String(brightness));
+      Serial.println("Sensor Delay: " + String(sensorDelay));
+      Serial.println("Ethernet IP: " + ethIP);
+      
+      // Trả về response với thông báo restart nếu cần
+      DynamicJsonDocument response(256);
+      response["status"] = "OK";
+      if (needRestart) {
+        response["message"] = "Settings saved. Restart required for IP changes.";
+        response["needRestart"] = true;
+      } else {
+        response["message"] = "Settings saved successfully";
+        response["needRestart"] = false;
+      }
+      
+      String out;
+      serializeJson(response, out);
+      server.send(200, "application/json", out);
+    } else {
+      server.send(400, "application/json", "{\"status\":\"Error\",\"message\":\"No data provided\"}");
+    }
+  });
+
+  // Individual setting endpoints
+  server.on("/brightness", HTTP_GET, [](){
+    if (server.hasArg("value")) {
+      int brightness = server.arg("value").toInt();
+      if (brightness >= 10 && brightness <= 100) {
+        dma_display->setBrightness8(map(brightness, 0, 100, 0, 255));
+        server.send(200, "application/json", "{\"status\":\"OK\",\"brightness\":" + String(brightness) + "}");
+      } else {
+        server.send(400, "application/json", "{\"status\":\"Error\",\"message\":\"Invalid brightness value\"}");
+      }
+    } else {
+      server.send(400, "application/json", "{\"status\":\"Error\",\"message\":\"Missing value parameter\"}");
+    }
+  });
+
+  server.on("/sensorDelay", HTTP_GET, [](){
+    if (server.hasArg("value")) {
+      int delay = server.arg("value").toInt();
+      Serial.println("Sensor delay updated to: " + String(delay) + "ms");
+      server.send(200, "application/json", "{\"status\":\"OK\",\"sensorDelay\":" + String(delay) + "}");
+    } else {
+      server.send(400, "application/json", "{\"status\":\"Error\",\"message\":\"Missing value parameter\"}");
+    }
+  });
+
+  server.on("/bagDetectionDelay", HTTP_GET, [](){
+    if (server.hasArg("value")) {
+      int delay = server.arg("value").toInt();
+      Serial.println("Bag detection delay updated to: " + String(delay) + "ms");
+      server.send(200, "application/json", "{\"status\":\"OK\",\"bagDetectionDelay\":" + String(delay) + "}");
+    } else {
+      server.send(400, "application/json", "{\"status\":\"Error\",\"message\":\"Missing value parameter\"}");
+    }
+  });
+
+  server.on("/minBagInterval", HTTP_GET, [](){
+    if (server.hasArg("value")) {
+      int interval = server.arg("value").toInt();
+      Serial.println("Min bag interval updated to: " + String(interval) + "ms");
+      server.send(200, "application/json", "{\"status\":\"OK\",\"minBagInterval\":" + String(interval) + "}");
+    } else {
+      server.send(400, "application/json", "{\"status\":\"Error\",\"message\":\"Missing value parameter\"}");
+    }
+  });
+
+  // API cập nhật số đếm từ web
+  server.on("/api/update_count", HTTP_POST, [](){
+    if (server.hasArg("plain")) {
+      DynamicJsonDocument doc(256);
+      deserializeJson(doc, server.arg("plain"));
+      
+      int orderId = doc["orderId"];
+      int newCount = doc["count"];
+      
+      // Cập nhật số đếm cho đơn hàng
+      Serial.println("Update count for order " + String(orderId) + ": " + String(newCount));
+      
+      // Cập nhật totalCount nếu là đơn hàng đang active
+      totalCount = newCount;
+      needUpdate = true;
+    }
+    server.send(200, "text/plain", "OK");
+  });
+
+  // API lấy trạng thái mở rộng
+  server.on("/api/extended_status", HTTP_GET, [](){
+    DynamicJsonDocument doc(512);
+    doc["status"] = isRunning ? "RUNNING" : "STOPPED";
+    doc["count"] = totalCount;
+    doc["target"] = targetCount;
+    doc["currentType"] = bagType;
+    doc["startTime"] = startTimeStr;
+    doc["isWarning"] = false;
+    doc["conveyorId"] = "BT-001";
+    doc["ipAddress"] = ETH.localIP().toString();
+    doc["uptime"] = millis() / 1000;
+    doc["freeHeap"] = ESP.getFreeHeap();
+    
+    // Kiểm tra ngưỡng cảnh báo
+    for (auto& cfg : bagConfigs) {
+      if (cfg.type == bagType) {
+        int warningThreshold = cfg.target - cfg.warn;
+        doc["isWarning"] = (totalCount >= warningThreshold);
+        doc["warningThreshold"] = warningThreshold;
+        break;
+      }
+    }
+    
+    String out;
+    serializeJson(doc, out);
+    server.send(200, "application/json", out);
+  });
+
+  // WiFi configuration endpoints
+  server.on("/api/wifi/scan", HTTP_GET, [](){
+    server.sendHeader("Access-Control-Allow-Origin", "*");
+    
+    int n = WiFi.scanNetworks();
+    DynamicJsonDocument doc(2048);
+    JsonArray networks = doc.createNestedArray("networks");
+    
+    for (int i = 0; i < n; i++) {
+      JsonObject network = networks.createNestedObject();
+      network["ssid"] = WiFi.SSID(i);
+      network["rssi"] = WiFi.RSSI(i);
+      network["encrypted"] = (WiFi.encryptionType(i) != WIFI_AUTH_OPEN);
+    }
+    
+    String out;
+    serializeJson(doc, out);
+    server.send(200, "application/json", out);
+  });
+
+  server.on("/api/wifi/connect", HTTP_POST, [](){
+    server.sendHeader("Access-Control-Allow-Origin", "*");
+    
+    if (server.hasArg("plain")) {
+      DynamicJsonDocument doc(512);
+      deserializeJson(doc, server.arg("plain"));
+      
+      String ssid = doc["ssid"];
+      String password = doc["password"];
+      bool useStaticIP = doc["use_static_ip"] | false;
+      String staticIP = doc["static_ip"];
+      String gateway = doc["gateway"];
+      String subnet = doc["subnet"];
+      String dns1 = doc["dns1"];
+      String dns2 = doc["dns2"];
+      
+      if (ssid.length() > 0) {
+        // Save WiFi config first
+        saveWiFiConfig(ssid, password, useStaticIP, staticIP, gateway, subnet, dns1, dns2);
+        
+        // Update global variables
+        wifi_ssid = ssid;
+        wifi_password = password;
+        wifi_use_static_ip = useStaticIP;
+        if (useStaticIP && staticIP.length() > 0) {
+          wifi_static_ip.fromString(staticIP);
+          if (gateway.length() > 0) wifi_gateway.fromString(gateway);
+          if (subnet.length() > 0) wifi_subnet.fromString(subnet);
+          if (dns1.length() > 0) wifi_dns1.fromString(dns1);
+          if (dns2.length() > 0) wifi_dns2.fromString(dns2);
+        }
+        
+        // Send immediate response to avoid timeout
+        DynamicJsonDocument response(256);
+        response["success"] = true;
+        response["message"] = "WiFi config saved. Attempting connection...";
+        response["status"] = "connecting";
+        
+        String out;
+        serializeJson(response, out);
+        server.send(200, "application/json", out);
+        
+        // Delay a bit to ensure response is sent
+        delay(100);
+        
+        // Now try to connect in background
+        Serial.println("Attempting WiFi connection to: " + ssid);
+        
+        // Configure WiFi
+        WiFi.mode(WIFI_STA);
+        
+        // Configure static IP if enabled
+        if (wifi_use_static_ip) {
+          Serial.println("Configuring static IP: " + wifi_static_ip.toString());
+          if (!WiFi.config(wifi_static_ip, wifi_gateway, wifi_subnet, wifi_dns1, wifi_dns2)) {
+            Serial.println("Failed to configure static IP");
+          }
+        }
+        
+        WiFi.begin(ssid.c_str(), password.c_str());
+        
+        // Check connection in background (non-blocking)
+        unsigned long startTime = millis();
+        bool connected = false;
+        while (millis() - startTime < 15000) {
+          if (WiFi.status() == WL_CONNECTED) {
+            connected = true;
+            break;
+          }
+          delay(500);
+          Serial.print(".");
+        }
+        
+        if (connected) {
+          currentNetworkMode = WIFI_STA_MODE;
+          wifiConnected = true;
+          Serial.println();
+          Serial.println("WiFi connected successfully!");
+          Serial.print("IP: ");
+          Serial.println(WiFi.localIP());
+          Serial.print("Gateway: ");
+          Serial.println(WiFi.gatewayIP());
+          Serial.print("Subnet: ");
+          Serial.println(WiFi.subnetMask());
+        } else {
+          Serial.println();
+          Serial.println("WiFi connection failed, reverting to AP mode");
+          // Revert to AP mode if WiFi connection fails
+          setupWiFiAP();
+        }
+        
+      } else {
+        server.send(400, "application/json", "{\"error\":\"SSID required\"}");
+      }
+    } else {
+      server.send(400, "application/json", "{\"error\":\"No data provided\"}");
+    }
+  });
+
+  server.on("/api/network/status", HTTP_GET, [](){
+    server.sendHeader("Access-Control-Allow-Origin", "*");
+    
+    DynamicJsonDocument doc(512);
+    doc["ethernet_connected"] = ethernetConnected;
+    doc["wifi_connected"] = wifiConnected;
+    doc["current_mode"] = (currentNetworkMode == ETHERNET_MODE) ? "ethernet" : 
+                         (currentNetworkMode == WIFI_STA_MODE) ? "wifi_sta" : "wifi_ap";
+    
+    if (currentNetworkMode == ETHERNET_MODE && ethernetConnected) {
+      doc["ip"] = ETH.localIP().toString();
+      doc["gateway"] = ETH.gatewayIP().toString();
+      doc["subnet"] = ETH.subnetMask().toString();
+      doc["dns"] = ETH.dnsIP().toString();
+    } else if (currentNetworkMode == WIFI_STA_MODE && wifiConnected) {
+      doc["ip"] = WiFi.localIP().toString();
+      doc["gateway"] = WiFi.gatewayIP().toString();
+      doc["subnet"] = WiFi.subnetMask().toString();
+      doc["dns"] = WiFi.dnsIP().toString();
+      doc["ssid"] = WiFi.SSID();
+    } else if (currentNetworkMode == WIFI_AP_MODE) {
+      doc["ip"] = WiFi.softAPIP().toString();
+      doc["ap_ssid"] = ap_ssid;
+    }
+    
+    String out;
+    serializeJson(doc, out);
+    server.send(200, "application/json", out);
+  });
+
+  // API restart ESP32 để áp dụng cấu hình IP mới
+  server.on("/api/restart", HTTP_POST, [](){
+    server.sendHeader("Access-Control-Allow-Origin", "*");
+    
+    DynamicJsonDocument doc(256);
+    doc["status"] = "OK";
+    doc["message"] = "ESP32 will restart in 2 seconds";
+    
+    String out;
+    serializeJson(doc, out);
+    server.send(200, "application/json", out);
+    
+    Serial.println("Restart requested from web - restarting in 2 seconds...");
+    delay(2000);
+    ESP.restart();
+  });
+
+  // API để force restart ethernet connection
+  server.on("/api/restart_ethernet", HTTP_POST, [](){
+    server.sendHeader("Access-Control-Allow-Origin", "*");
+    
+    // Load settings từ file
+    if (LittleFS.exists("/settings.json")) {
+      File file = LittleFS.open("/settings.json", "r");
+      if (file) {
+        String content = file.readString();
+        file.close();
+        
+        DynamicJsonDocument doc(1024);
+        if (deserializeJson(doc, content) == DeserializationError::Ok) {
+          String ethIP = doc["ipAddress"];
+          String ethGateway = doc["gateway"];
+          String ethSubnet = doc["subnet"];
+          
+          if (ethIP.length() > 0) {
+            IPAddress newIP, newGateway, newSubnet;
+            if (newIP.fromString(ethIP) && newGateway.fromString(ethGateway) && newSubnet.fromString(ethSubnet)) {
+              local_IP = newIP;
+              gateway = newGateway;
+              subnet = newSubnet;
+              
+              Serial.println("Applying new Ethernet config:");
+              Serial.println("IP: " + ethIP);
+              Serial.println("Gateway: " + ethGateway);
+              Serial.println("Subnet: " + ethSubnet);
+            }
+          }
+        }
+      }
+    }
+    
+    server.send(200, "application/json", "{\"status\":\"OK\",\"message\":\"Restarting with new IP config\"}");
+    delay(1000);
+    ESP.restart();
+  });
+
+  // API để kiểm tra kết quả kết nối WiFi
+  server.on("/api/wifi/status", HTTP_GET, [](){
+    server.sendHeader("Access-Control-Allow-Origin", "*");
+    
+    DynamicJsonDocument doc(256);
+    doc["wifi_connected"] = wifiConnected;
+    doc["current_mode"] = (currentNetworkMode == ETHERNET_MODE) ? "ethernet" : 
+                         (currentNetworkMode == WIFI_STA_MODE) ? "wifi_sta" : "wifi_ap";
+    
+    if (currentNetworkMode == WIFI_STA_MODE && wifiConnected) {
+      doc["success"] = true;
+      doc["ip"] = WiFi.localIP().toString();
+      doc["gateway"] = WiFi.gatewayIP().toString();
+      doc["subnet"] = WiFi.subnetMask().toString();
+      doc["ssid"] = WiFi.SSID();
+      doc["use_static_ip"] = wifi_use_static_ip;
+      doc["message"] = "WiFi connected successfully";
+    } else if (currentNetworkMode == WIFI_AP_MODE) {
+      doc["success"] = false;
+      doc["message"] = "WiFi connection failed, AP mode active";
+      doc["ap_ip"] = WiFi.softAPIP().toString();
+    } else {
+      doc["success"] = false;
+      doc["message"] = "WiFi connection in progress or failed";
+    }
+    
+    String out;
+    serializeJson(doc, out);
+    server.send(200, "application/json", out);
   });
 
   server.begin();
@@ -818,7 +2053,7 @@ void updateDoneLED() {
 void updateStartLED() {
   // Đèn START (GPIO 22) chỉ phụ thuộc vào lệnh Start/Pause/Reset
   if (isRunning) {
-    startLedOn = true;  // Sáng (LOW)
+    startLedOn = true;  // Sáng (LOW)  
   } else {
     startLedOn = false; // Tắt (HIGH)
   }
@@ -833,8 +2068,11 @@ void setup() {
   Serial.begin(115200);
   Serial.println("Booting...");
   LittleFS.begin();
+  
+  // Load cấu hình từ file
   loadBagTypesFromFile();
   loadBagConfigsFromFile();
+  loadSettingsFromFile();  // Load cài đặt chung bao gồm IP Ethernet
   
   // Khởi tạo chân cảm biến và LED
   pinMode(SENSOR_PIN, INPUT_PULLUP);
@@ -864,7 +2102,7 @@ void setup() {
   Serial.println("LittleFS OK");
   loadBagTypesFromFile();
   loadBagConfigsFromFile();
-  setupEthernet();
+  setupNetwork();
   setupMQTT();
   Serial.println("MQTT OK");
   setupTime();
@@ -877,7 +2115,22 @@ void setup() {
   mxconfig.i2sspeed = HUB75_I2S_CFG::HZ_10M;
   dma_display = new MatrixPanel_I2S_DMA(mxconfig);
   dma_display->begin();
-  dma_display->setBrightness8(35);
+  
+  // Load brightness từ settings
+  int savedBrightness = 35; // default
+  if (LittleFS.exists("/settings.json")) {
+    File file = LittleFS.open("/settings.json", "r");
+    if (file) {
+      String content = file.readString();
+      file.close();
+      DynamicJsonDocument doc(1024);
+      if (deserializeJson(doc, content) == DeserializationError::Ok) {
+        savedBrightness = doc["brightness"] | 35;
+      }
+    }
+  }
+  dma_display->setBrightness8(map(savedBrightness, 0, 100, 0, 255));
+  
   myBLACK = dma_display->color565(0, 0, 0);
   myWHITE = dma_display->color565(255, 255, 255);
   myRED = dma_display->color565(255, 0, 0);
@@ -909,7 +2162,21 @@ void loop() {
         if (btn > 0) {
           Serial.print("IR Remote - Nhan nut: ");
           Serial.println(btn);
+          Serial.print("IR Remote - Ma hex: 0x");
+          Serial.println(code, HEX);
+          Serial.print("Trang thai truoc khi xu ly - isRunning: ");
+          Serial.print(isRunning);
+          Serial.print(", isTriggerEnabled: ");
+          Serial.print(isTriggerEnabled);
+          Serial.print(", isCountingEnabled: ");
+          Serial.println(isCountingEnabled);
           handleIRCommand(btn);
+          Serial.print("Trang thai sau khi xu ly - isRunning: ");
+          Serial.print(isRunning);
+          Serial.print(", isTriggerEnabled: ");
+          Serial.print(isTriggerEnabled);
+          Serial.print(", isCountingEnabled: ");
+          Serial.println(isCountingEnabled);
         } else {
           Serial.print("IR Remote - Ma khong xac dinh: 0x");
           Serial.println(code, HEX);
@@ -932,6 +2199,11 @@ void loop() {
         triggerState = triggerReading;
         if (triggerState == LOW) {  // Khi phát hiện vật thể
           isCountingEnabled = true;  // Kích hoạt cảm biến đếm
+          Serial.println("TRIGGER SENSOR: Phat hien vat the -> Kich hoat dem!");
+          Serial.print("isCountingEnabled = ");
+          Serial.println(isCountingEnabled);
+        } else {
+          Serial.println("TRIGGER SENSOR: Khong con vat the");
         }
       }
     }
@@ -950,8 +2222,18 @@ void loop() {
       if (reading != sensorState) {
         sensorState = reading;
         if (sensorState == LOW && isRunning && !isLimitReached) {
+          Serial.print("COUNT SENSOR: Phat hien tui! Count: ");
+          Serial.print(totalCount);
+          Serial.print(" -> ");
+          Serial.println(totalCount + 1);
           updateCount();
           needUpdate = true;
+        } else if (sensorState == LOW) {
+          Serial.print("COUNT SENSOR: Phat hien nhung khong dem (isRunning=");
+          Serial.print(isRunning);
+          Serial.print(", isLimitReached=");
+          Serial.print(isLimitReached);
+          Serial.println(")");
         }
       }
     }
