@@ -6,8 +6,8 @@
 - **ESP32**: Vi điều khiển chính với W5500 Ethernet + WiFi
 - **LED Matrix**: Hiển thị 64x32 px (2 panel nối chain)
 - **Cảm biến**: T61 sensor + Encoder trigger
-- **Remote IR**: Điều khiển từ xa (GPIO 1)
-- **LED/Relay**: Start LED (GPIO 38), Done buzzer (GPIO 5)
+- **Remote IR**: Điều khiển từ xa
+- **LED/Relay**: Start relay , Done buzzer
 
 ### TRẠNG THÁI HỆ THỐNG
 Hệ thống có 3 trạng thái chính:
