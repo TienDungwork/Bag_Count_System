@@ -173,10 +173,6 @@
               <i class="fas fa-redo"></i>
               Reset
             </button>
-            <button id="historyBtn" class="action-btn history-btn" onclick="showBatchHistory()">
-              <i class="fas fa-history"></i>
-              Lịch sử
-            </button>
           </div>
         </div>
       </div>
@@ -204,8 +200,25 @@
             </button>
           </div>
 
-          <div class="history-list" id="historyList">
-            <!-- Dynamic content -->
+          <div class="history-list">
+            <table class="history-table">
+              <thead>
+                <tr>
+                  <th>Thời gian</th>
+                  <th>Khách hàng</th>
+                  <th>Xe</th>
+                  <th>Sản phẩm</th>
+                  <th>Kế hoạch</th>
+                  <th>Thực tế</th>
+                  <th>Kết quả</th>
+                </tr>
+              </thead>
+              <tbody id="historyTableBody">
+                <tr>
+                  <td colspan="7" class="text-center">Chưa có lịch sử đếm</td>
+                </tr>
+              </tbody>
+            </table>
           </div>
         </div>
       </div>
@@ -543,6 +556,8 @@
     </div>
   </div>
 
+  <!-- MQTT.js library for WebSocket MQTT -->
+  <script src="https://unpkg.com/mqtt@4.3.7/dist/mqtt.min.js"></script>
   <script src="script.js"></script>
 </body>
 </html>

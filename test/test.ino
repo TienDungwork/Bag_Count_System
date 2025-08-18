@@ -1,3 +1,4 @@
+
 //>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>> Bag Counter Display
 #include "soc/soc.h"
 #include "soc/rtc_cntl_reg.h"
@@ -55,6 +56,28 @@ const char* ap_password = "12345678";
 
 //----------------------------------------Network & MQTT config
 const char* mqtt_server = "test.mosquitto.org";
+
+//----------------------------------------MQTT Topics Structure
+// Publish topics (ESP32 gửi data)
+const char* TOPIC_STATUS = "bagcounter/status";           // Trạng thái tổng quát
+const char* TOPIC_COUNT = "bagcounter/count";             // Số đếm real-time
+const char* TOPIC_ALERTS = "bagcounter/alerts";           // Cảnh báo/hoàn thành
+const char* TOPIC_SENSOR = "bagcounter/sensor";           // Dữ liệu cảm biến
+const char* TOPIC_HEARTBEAT = "bagcounter/heartbeat";     // Keep-alive signal
+const char* TOPIC_IR_CMD = "bagcounter/ir_command";       // IR Remote commands
+
+// Subscribe topics (ESP32 nhận lệnh)
+const char* TOPIC_CMD_START = "bagcounter/cmd/start";     // Lệnh start
+const char* TOPIC_CMD_PAUSE = "bagcounter/cmd/pause";     // Lệnh pause  
+const char* TOPIC_CMD_RESET = "bagcounter/cmd/reset";     // Lệnh reset
+const char* TOPIC_CMD_SELECT = "bagcounter/cmd/select";   // Chọn đơn hàng
+const char* TOPIC_CONFIG = "bagcounter/config/update";    // Cập nhật config
+
+// MQTT timing variables
+unsigned long lastMqttPublish = 0;
+unsigned long lastHeartbeat = 0;
+const unsigned long MQTT_PUBLISH_INTERVAL = 2000;  // 2 giây
+const unsigned long HEARTBEAT_INTERVAL = 30000;    // 30 giây
 
 //----------------------------------------IP tĩnh config (Ethernet)
 IPAddress local_IP(192, 168, 1, 200);     // IP tĩnh Ethernet
@@ -124,6 +147,7 @@ unsigned long lastBlink = 0;
 bool needUpdate = true;  // Biến để theo dõi cần cập nhật LED
 String startTimeStr = ""; // Thời gian bắt đầu thực tế
 bool timeWaitingForSync = false; // Biến theo dõi trạng thái chờ đồng bộ thời gian
+String currentSystemStatus = "RESET"; // Trạng thái hệ thống: RUNNING, PAUSE, RESET (chỉ 3 trạng thái)
 
 // Biến để xử lý debounce cho cảm biến
 unsigned long lastDebounceTime = 0;
@@ -146,6 +170,11 @@ decode_results results;
 unsigned long lastIRCode = 0;
 unsigned long lastIRTime = 0;
 unsigned long debounceIRTime = 200; // ms
+
+// IR Command tracking for web notification
+String lastIRCommand = "";
+unsigned long lastIRTimestamp = 0;
+bool hasNewIRCommand = false;
 
 // File paths
 #define BAGTYPES_FILE "/bagtypes.json"
@@ -186,6 +215,7 @@ void handleIRCommand(int button) {
       Serial.println("IR Remote: Start command");
       isRunning = true;
       isTriggerEnabled = true;
+      currentSystemStatus = "RUNNING"; // Set trạng thái chính xác
       action = "START";
       // Cập nhật thời gian bắt đầu khi Start
       if (time(nullptr) > 24 * 3600) {
@@ -220,6 +250,7 @@ void handleIRCommand(int button) {
       isRunning = false;
       isTriggerEnabled = false;
       isCountingEnabled = false;
+      currentSystemStatus = "PAUSE"; // Set trạng thái chính xác
       action = "PAUSE";
       // CAP NHAT NGAY LAP TUC TRANG THAI CHO TAT CA BAGCONFIG
       Serial.print("IR Remote PAUSE - Updating ");
@@ -247,6 +278,7 @@ void handleIRCommand(int button) {
       history.clear();
       startTimeStr = "";
       timeWaitingForSync = false;
+      currentSystemStatus = "RESET"; // Set trạng thái RESET
       action = "RESET";
       // CAP NHAT NGAY LAP TUC TRANG THAI CHO TAT CA BAGCONFIG
       Serial.print("IR Remote RESET - Updating ");
@@ -258,19 +290,6 @@ void handleIRCommand(int button) {
         Serial.print("Updated ");
         Serial.print(cfg.type);
         Serial.println(" -> RESET");
-      }
-      saveBagConfigsToFile();
-      
-      // SAU KHI RESET, TỰ ĐỘNG CHUYỂN VỀ WAIT SAU MỘT CHÚT
-      Serial.println("Scheduling auto-transition to WAIT in 2 seconds...");
-      delay(100);  // Đợi web nhận được status RESET
-      
-      Serial.println("Auto-transitioning all bagConfigs to WAIT");
-      for (auto& cfg : bagConfigs) {
-        cfg.status = "WAIT";  // Set TAT CA ve WAIT
-        Serial.print("Updated ");
-        Serial.print(cfg.type);
-        Serial.println(" -> WAIT");
       }
       saveBagConfigsToFile();
       updateStartLED();
@@ -291,7 +310,120 @@ void handleIRCommand(int button) {
   serializeJson(doc, msg);
   mqtt.publish("bagcounter/ir_command", msg.c_str());
   
+  // MQTT: Publish updated status after IR command
+  publishStatusMQTT();
+  
+  // 🚨 MQTT: Publish IR command alert
+  publishAlert("IR_COMMAND", "IR Remote: " + action + " - " + (isRunning ? "RUNNING" : "STOPPED"));
+  
+  // LUU IR COMMAND CHO WEB POLLING
+  lastIRCommand = action;
+  lastIRTimestamp = millis();
+  hasNewIRCommand = true;
+  
   Serial.println("IR Command processed: " + action);
+  Serial.println("IR Command saved for web polling: " + action);
+}
+
+// Handle commands from Web via MQTT (similar to IR but no IR alerts)
+void handleWebCommand(int button) {
+  String action = "";
+  
+  switch(button) {
+    case 1: // Start
+      Serial.println("Web: Start command");
+      isRunning = true;
+      isTriggerEnabled = true;
+      currentSystemStatus = "RUNNING"; // Set trạng thái chính xác
+      action = "START";
+      
+      // Update start time
+      if (time(nullptr) > 24 * 3600) {
+        startTimeStr = getTimeStr();
+        timeWaitingForSync = false;
+        Serial.print("Web - Start time: ");
+        Serial.println(startTimeStr);
+      } else {
+        startTimeStr = "Waiting for time sync...";
+        timeWaitingForSync = true;
+        Serial.println("Web - Time not synced yet");
+      }
+      
+      // Update all bagConfigs to RUNNING
+      Serial.print(" Web START - Updating ");
+      Serial.print(bagConfigs.size());
+      Serial.println(" bagConfigs to RUNNING");
+      
+      for (auto& cfg : bagConfigs) {
+        cfg.status = "RUNNING";
+        Serial.print("Updated ");
+        Serial.print(cfg.type);
+        Serial.println(" -> RUNNING");
+      }
+      saveBagConfigsToFile();
+      updateStartLED();
+      needUpdate = true;
+      break;
+      
+    case 2: // Pause
+      Serial.println("Web: Pause command");
+      isRunning = false;
+      isTriggerEnabled = false;
+      isCountingEnabled = false;
+      currentSystemStatus = "PAUSE"; // Set trạng thái chính xác
+      action = "PAUSE";
+      
+      // Update all bagConfigs to PAUSE
+      Serial.print("Web PAUSE - Updating ");
+      Serial.print(bagConfigs.size());
+      Serial.println(" bagConfigs to PAUSE");
+      
+      for (auto& cfg : bagConfigs) {
+        cfg.status = "PAUSE";
+        Serial.print("Updated ");
+        Serial.print(cfg.type);
+        Serial.println(" -> PAUSE");
+      }
+      saveBagConfigsToFile();
+      updateStartLED();
+      needUpdate = true;
+      break;
+      
+    case 3: // Reset
+      Serial.println("Web: Reset command");
+      totalCount = 0;
+      isLimitReached = false;
+      isRunning = false;
+      isTriggerEnabled = false;
+      isCountingEnabled = false;
+      history.clear();
+      startTimeStr = "";
+      timeWaitingForSync = false;
+      currentSystemStatus = "RESET"; // Set trạng thái RESET
+      action = "RESET";
+      
+      // Update all bagConfigs to RESET
+      Serial.print("Web RESET - Updating ");
+      Serial.print(bagConfigs.size());
+      Serial.println(" bagConfigs to RESET");
+      
+      for (auto& cfg : bagConfigs) {
+        cfg.status = "RESET";
+        Serial.print("Updated ");
+        Serial.print(cfg.type);
+        Serial.println(" -> RESET");
+      }
+      saveBagConfigsToFile();
+      updateStartLED();
+      updateDoneLED();
+      needUpdate = true;
+      break;
+  }
+  
+  // MQTT: Publish updated status after web command (NO IR alerts)
+  publishStatusMQTT();
+  
+  Serial.println("Web command processed: " + action);
 }
 
 //------------------- Lưu/đọc loại bao -------------------
@@ -584,7 +716,43 @@ void setupNetwork() {
 
 void setupMQTT() {
   mqtt.setServer(mqtt_server, 1883);
-  mqtt.connect("esp32_bag_counter");
+  mqtt.setCallback(onMqttMessage); // Set callback để nhận message
+  mqtt.setBufferSize(512); // Increase buffer size for larger messages
+  mqtt.setKeepAlive(15); // Keep alive interval
+  
+  // Thử kết nối MQTT
+  String clientId = "ESP32_BagCounter_" + String(WiFi.macAddress());
+  clientId.replace(":", "");
+  
+  Serial.print("🔌 Connecting to MQTT broker: ");
+  Serial.println(mqtt_server);
+  
+  if (mqtt.connect(clientId.c_str())) {
+    Serial.println("MQTT connected successfully!");
+    Serial.println("Client ID: " + clientId);
+    
+    // Subscribe các topic để nhận lệnh điều khiển
+    mqtt.subscribe(TOPIC_CMD_START);
+    mqtt.subscribe(TOPIC_CMD_PAUSE);
+    mqtt.subscribe(TOPIC_CMD_RESET);
+    mqtt.subscribe(TOPIC_CMD_SELECT);
+    mqtt.subscribe(TOPIC_CONFIG);
+    
+    Serial.println("Subscribed to control topics:");
+    Serial.println("  - " + String(TOPIC_CMD_START));
+    Serial.println("  - " + String(TOPIC_CMD_PAUSE));
+    Serial.println("  - " + String(TOPIC_CMD_RESET));
+    Serial.println("  - " + String(TOPIC_CMD_SELECT));
+    Serial.println("  - " + String(TOPIC_CONFIG));
+    
+    // Publish online status
+    publishHeartbeat();
+    
+  } else {
+    Serial.print("MQTT connection failed, rc=");
+    Serial.println(mqtt.state());
+    Serial.println("Will retry in main loop...");
+  }
 }
 
 void setupTime() {
@@ -624,6 +792,237 @@ String getTimeStr() {
   char buf[32];
   strftime(buf, sizeof(buf), "%H:%M - %d/%m/%Y", t);
   return String(buf);
+}
+
+//----------------------------------------MQTT Callback & Publish Functions
+void onMqttMessage(char* topic, byte* payload, unsigned int length) {
+  // Convert payload to string
+  String message = "";
+  for (int i = 0; i < length; i++) {
+    message += (char)payload[i];
+  }
+  
+  String topicStr = String(topic);
+  Serial.println("MQTT Message received:");
+  Serial.println("  Topic: " + topicStr);
+  Serial.println("  Message: " + message);
+  
+  // Xử lý các lệnh điều khiển
+  if (topicStr == TOPIC_CMD_START) {
+    Serial.println("MQTT Command: START from Web");
+    handleWebCommand(1); // Start command from web
+    
+  } else if (topicStr == TOPIC_CMD_PAUSE) {
+    Serial.println("MQTT Command: PAUSE from Web");
+    handleWebCommand(2); // Pause command from web
+    
+  } else if (topicStr == TOPIC_CMD_RESET) {
+    Serial.println("MQTT Command: RESET from Web");
+    handleWebCommand(3); // Reset command from web
+    
+  } else if (topicStr == TOPIC_CMD_SELECT) {
+    Serial.println("MQTT Command: SELECT ORDER");
+    // Parse JSON để chọn đơn hàng
+    DynamicJsonDocument doc(256);
+    if (deserializeJson(doc, message) == DeserializationError::Ok) {
+      String orderType = doc["type"];
+      int target = doc["target"] | 20;
+      int warn = doc["warn"] | 10;
+      
+      if (orderType.length() > 0) {
+        bagType = orderType;
+        targetCount = target;
+        
+        // Reset trạng thái cho đơn hàng mới
+        totalCount = 0;
+        isRunning = false;
+        isTriggerEnabled = false;
+        isCountingEnabled = false;
+        isLimitReached = false;
+        
+        // Cập nhật bagConfig
+        bool found = false;
+        for (auto& cfg : bagConfigs) {
+          if (cfg.type == orderType) {
+            cfg.target = target;
+            cfg.warn = warn;
+            cfg.status = "SELECTED";
+            found = true;
+            break;
+          }
+        }
+        
+        if (!found) {
+          BagConfig newCfg = {orderType, target, warn, "SELECTED"};
+          bagConfigs.push_back(newCfg);
+        }
+        
+        saveBagConfigsToFile();
+        needUpdate = true;
+        
+        // Publish confirmation
+        publishStatusMQTT();
+        
+        Serial.println("Order selected via MQTT: " + orderType);
+      }
+    }
+    
+  } else if (topicStr == TOPIC_CONFIG) {
+    Serial.println("MQTT Command: CONFIG UPDATE");
+    // Parse JSON config update
+    DynamicJsonDocument doc(512);
+    if (deserializeJson(doc, message) == DeserializationError::Ok) {
+      if (doc.containsKey("brightness")) {
+        int brightness = doc["brightness"];
+        if (brightness >= 10 && brightness <= 100) {
+          dma_display->setBrightness8(map(brightness, 0, 100, 0, 255));
+          Serial.println("Brightness updated via MQTT: " + String(brightness));
+        }
+      }
+      
+      if (doc.containsKey("target")) {
+        targetCount = doc["target"];
+        Serial.println("Target updated via MQTT: " + String(targetCount));
+        needUpdate = true;
+      }
+      
+      // Thêm xử lý resetLimit để ESP32 tiếp tục đếm
+      if (doc.containsKey("resetLimit") && doc["resetLimit"]) {
+        isLimitReached = false;
+        Serial.println("Limit reset via MQTT - continuing count");
+        needUpdate = true;
+      }
+    }
+  }
+}
+
+void publishStatusMQTT() {
+  static unsigned long lastPublish = 0;
+  
+  // Debounce - chỉ publish mỗi 500ms để tránh spam
+  if (millis() - lastPublish < 500) {
+    return;
+  }
+  lastPublish = millis();
+  
+  if (!mqtt.connected()) {
+    Serial.println("MQTT not connected - cannot publish status");
+    return;
+  }
+  
+  DynamicJsonDocument doc(512);
+  doc["deviceId"] = "BT-001";
+  doc["status"] = currentSystemStatus; // Sử dụng trạng thái chính xác thay vì chỉ RUNNING/STOPPED
+  doc["count"] = totalCount;
+  doc["target"] = targetCount;
+  doc["type"] = bagType;
+  doc["startTime"] = startTimeStr;
+  doc["timestamp"] = getTimeStr();
+  doc["uptime"] = millis() / 1000;
+  doc["isWarning"] = false;
+  doc["limitReached"] = isLimitReached;
+  doc["sensorEnabled"] = isCountingEnabled;
+  doc["triggerEnabled"] = isTriggerEnabled;
+  
+  // Kiểm tra cảnh báo
+  for (auto& cfg : bagConfigs) {
+    if (cfg.type == bagType) {
+      int warningThreshold = cfg.target - cfg.warn;
+      doc["isWarning"] = (totalCount >= warningThreshold);
+      doc["warningThreshold"] = warningThreshold;
+      break;
+    }
+  }
+  
+  String message;
+  serializeJson(doc, message);
+  
+  Serial.print("📤 Publishing status MQTT (");
+  Serial.print(message.length());
+  Serial.print(" bytes): ");
+  Serial.println(message);
+  
+  bool published = mqtt.publish(TOPIC_STATUS, message.c_str());
+  if (published) {
+    Serial.println("Status published to MQTT");
+  } else {
+    Serial.print("Failed to publish status to MQTT. State: ");
+    Serial.println(mqtt.state());
+  }
+}
+
+void publishCountUpdate() {
+  if (!mqtt.connected()) return;
+  
+  DynamicJsonDocument doc(256);
+  doc["deviceId"] = "BT-001";
+  doc["count"] = totalCount;
+  doc["target"] = targetCount;
+  doc["type"] = bagType;
+  doc["timestamp"] = getTimeStr();
+  doc["progress"] = (float)totalCount / targetCount * 100;
+  
+  String message;
+  serializeJson(doc, message);
+  
+  mqtt.publish(TOPIC_COUNT, message.c_str());
+  Serial.println("Count update published: " + String(totalCount));
+}
+
+void publishAlert(String alertType, String message) {
+  if (!mqtt.connected()) return;
+  
+  DynamicJsonDocument doc(256);
+  doc["deviceId"] = "BT-001";
+  doc["alertType"] = alertType; // "WARNING", "COMPLETED", "ERROR"
+  doc["message"] = message;
+  doc["count"] = totalCount;
+  doc["target"] = targetCount;
+  doc["type"] = bagType;
+  doc["timestamp"] = getTimeStr();
+  
+  String alertMessage;
+  serializeJson(doc, alertMessage);
+  
+  mqtt.publish(TOPIC_ALERTS, alertMessage.c_str());
+  Serial.println("Alert published: " + alertType + " - " + message);
+}
+
+void publishSensorData() {
+  if (!mqtt.connected()) return;
+  
+  DynamicJsonDocument doc(256);
+  doc["deviceId"] = "BT-001";
+  doc["sensorTriggered"] = isCountingEnabled;
+  doc["triggerEnabled"] = isTriggerEnabled;
+  doc["lastTrigger"] = millis();
+  doc["sensorState"] = digitalRead(SENSOR_PIN) == LOW ? "DETECTED" : "CLEAR";
+  doc["triggerState"] = digitalRead(TRIGGER_SENSOR_PIN) == LOW ? "DETECTED" : "CLEAR";
+  doc["timestamp"] = getTimeStr();
+  
+  String message;
+  serializeJson(doc, message);
+  
+  mqtt.publish(TOPIC_SENSOR, message.c_str());
+}
+
+void publishHeartbeat() {
+  if (!mqtt.connected()) return;
+  
+  DynamicJsonDocument doc(256);
+  doc["deviceId"] = "BT-001";
+  doc["status"] = "ONLINE";
+  doc["uptime"] = millis() / 1000;
+  doc["freeHeap"] = ESP.getFreeHeap();
+  doc["wifiRSSI"] = WiFi.RSSI();
+  doc["ipAddress"] = currentNetworkMode == ETHERNET_MODE ? ETH.localIP().toString() : WiFi.localIP().toString();
+  doc["timestamp"] = getTimeStr();
+  
+  String message;
+  serializeJson(doc, message);
+  
+  mqtt.publish(TOPIC_HEARTBEAT, message.c_str());
+  Serial.println("Heartbeat published");
 }
 
 //----------------------------------------Web server API
@@ -714,6 +1113,17 @@ void setupWebServer() {
     doc["limitReached"] = isLimitReached;
     doc["currentTime"] = getTimeStr();
     
+    // Extended info (merged from extended_status)
+    doc["conveyorId"] = "BT-001";
+    doc["ipAddress"] = currentNetworkMode == ETHERNET_MODE ? ETH.localIP().toString() : WiFi.localIP().toString();
+    doc["uptime"] = millis() / 1000;
+    doc["freeHeap"] = ESP.getFreeHeap();
+    doc["mqttConnected"] = mqtt.connected();
+    
+    // LED states
+    doc["startLedOn"] = startLedOn;
+    doc["doneLedOn"] = doneLedOn;
+    
     // Thêm tên băng tải từ settings
     if (LittleFS.exists("/settings.json")) {
       File file = LittleFS.open("/settings.json", "r");
@@ -740,36 +1150,26 @@ void setupWebServer() {
       }
     }
     
+    // THONG TIN IR COMMAND CHO WEB
+    doc["lastIRCommand"] = lastIRCommand;
+    doc["lastIRTimestamp"] = lastIRTimestamp;
+    doc["hasNewIRCommand"] = hasNewIRCommand;
+    
+    // Reset flag sau khi gửi cho web
+    if (hasNewIRCommand) {
+      hasNewIRCommand = false;
+      Serial.println("IR Command flag reset after sending to web");
+    }
+    
     String out;
     serializeJson(doc, out);
     server.send(200, "application/json", out);
   });
 
-  // API kiểm tra thay đổi từ IR Remote - Real-time để web poll
-  server.on("/api/ir_status", HTTP_GET, [](){
-    server.sendHeader("Access-Control-Allow-Origin", "*");
-    server.sendHeader("Cache-Control", "no-cache, no-store, must-revalidate");
-    
-    DynamicJsonDocument doc(512);
-    doc["lastIRCommand"] = "";  // Có thể thêm biến để track lệnh IR cuối
-    doc["status"] = isRunning ? "RUNNING" : "STOPPED";
-    doc["count"] = totalCount;
-    doc["timestamp"] = millis();
-    doc["sensorEnabled"] = isCountingEnabled;
-    doc["triggerEnabled"] = isTriggerEnabled;
-    doc["limitReached"] = isLimitReached;
-    doc["startTime"] = startTimeStr;
-    doc["currentType"] = bagType;
-    doc["target"] = targetCount;
-    
-    // Trạng thái LED
-    doc["startLedOn"] = startLedOn;
-    doc["doneLedOn"] = doneLedOn;
-    
-    String out;
-    serializeJson(doc, out);
-    server.send(200, "application/json", out);
-  });
+  // API kiểm tra thay đổi từ IR Remote - DEPRECATED: Thay bằng MQTT
+  // server.on("/api/ir_status", HTTP_GET, [](){
+  //   // Đã chuyển sang MQTT real-time
+  // });
 
   // API lấy thời gian hiện tại
   server.on("/api/current_time", HTTP_GET, [](){
@@ -1001,7 +1401,7 @@ void setupWebServer() {
         
         Serial.println("Current order updated successfully");
       } else if (cmd == "next_order") {
-        // 🔄 XỬ LÝ CHUYỂN SANG ĐƠN HÀNG TIẾP THEO
+        // XỬ LÝ CHUYỂN SANG ĐƠN HÀNG TIẾP THEO
         Serial.println("Next order command received");
         
         String productName = doc["productName"];
@@ -1054,15 +1454,15 @@ void setupWebServer() {
           newCfg.warn = warningQuantity;
           newCfg.status = "RUNNING";
           bagConfigs.push_back(newCfg);
-          Serial.println("✅ Created new bagConfig with RUNNING status");
+          Serial.println("Created new bagConfig with RUNNING status");
         }
         
-        // ✅ QUAN TRỌNG: CẬP NHẬT TẤT CẢ BAGCONFIG CỦA CÙNG LOẠI SẢN PHẨM
+
         // Để đảm bảo /api/status trả về đúng
         for (auto& cfg : bagConfigs) {
           if (cfg.type == bagType) {  // bagType hiện tại đang active
             cfg.status = "RUNNING";
-            Serial.println("✅ Updated current bagType status to RUNNING");
+            Serial.println("Updated current bagType status to RUNNING");
             break;
           }
         }
@@ -1071,7 +1471,7 @@ void setupWebServer() {
         updateStartLED();
         needUpdate = true;
         
-        Serial.println("✅ Next order setup completed - Status: RUNNING");
+        Serial.println("Next order setup completed - Status: RUNNING");
       } else if (cmd == "select") {
         String type = doc["type"];
         int target = doc["target"] | 20;
@@ -1534,98 +1934,32 @@ void setupWebServer() {
     }
   });
 
-  // Individual setting endpoints
-  server.on("/brightness", HTTP_GET, [](){
-    if (server.hasArg("value")) {
-      int brightness = server.arg("value").toInt();
-      if (brightness >= 10 && brightness <= 100) {
-        dma_display->setBrightness8(map(brightness, 0, 100, 0, 255));
-        server.send(200, "application/json", "{\"status\":\"OK\",\"brightness\":" + String(brightness) + "}");
-      } else {
-        server.send(400, "application/json", "{\"status\":\"Error\",\"message\":\"Invalid brightness value\"}");
-      }
-    } else {
-      server.send(400, "application/json", "{\"status\":\"Error\",\"message\":\"Missing value parameter\"}");
-    }
-  });
+  // Individual setting endpoints - DEPRECATED: Sử dụng MQTT config thay thế
+  // server.on("/brightness", HTTP_GET, [](){
+  //   // Đã chuyển sang MQTT: bagcounter/config/update {"brightness": 50}
+  // });
+  
+  // server.on("/sensorDelay", HTTP_GET, [](){
+  //   // Đã chuyển sang MQTT: bagcounter/config/update {"sensorDelay": 50}
+  // });
+  
+  // server.on("/bagDetectionDelay", HTTP_GET, [](){
+  //   // Đã chuyển sang MQTT: bagcounter/config/update {"bagDetectionDelay": 200}
+  // });
+  
+  // server.on("/minBagInterval", HTTP_GET, [](){
+  //   // Đã chuyển sang MQTT: bagcounter/config/update {"minBagInterval": 100}
+  // });
 
-  server.on("/sensorDelay", HTTP_GET, [](){
-    if (server.hasArg("value")) {
-      int delay = server.arg("value").toInt();
-      Serial.println("Sensor delay updated to: " + String(delay) + "ms");
-      server.send(200, "application/json", "{\"status\":\"OK\",\"sensorDelay\":" + String(delay) + "}");
-    } else {
-      server.send(400, "application/json", "{\"status\":\"Error\",\"message\":\"Missing value parameter\"}");
-    }
-  });
+  // API cập nhật số đếm từ web - DEPRECATED: Chỉ sử dụng MQTT
+  // server.on("/api/update_count", HTTP_POST, [](){
+  //   // Đã chuyển sang MQTT real-time updates
+  // });
 
-  server.on("/bagDetectionDelay", HTTP_GET, [](){
-    if (server.hasArg("value")) {
-      int delay = server.arg("value").toInt();
-      Serial.println("Bag detection delay updated to: " + String(delay) + "ms");
-      server.send(200, "application/json", "{\"status\":\"OK\",\"bagDetectionDelay\":" + String(delay) + "}");
-    } else {
-      server.send(400, "application/json", "{\"status\":\"Error\",\"message\":\"Missing value parameter\"}");
-    }
-  });
-
-  server.on("/minBagInterval", HTTP_GET, [](){
-    if (server.hasArg("value")) {
-      int interval = server.arg("value").toInt();
-      Serial.println("Min bag interval updated to: " + String(interval) + "ms");
-      server.send(200, "application/json", "{\"status\":\"OK\",\"minBagInterval\":" + String(interval) + "}");
-    } else {
-      server.send(400, "application/json", "{\"status\":\"Error\",\"message\":\"Missing value parameter\"}");
-    }
-  });
-
-  // API cập nhật số đếm từ web
-  server.on("/api/update_count", HTTP_POST, [](){
-    if (server.hasArg("plain")) {
-      DynamicJsonDocument doc(256);
-      deserializeJson(doc, server.arg("plain"));
-      
-      int orderId = doc["orderId"];
-      int newCount = doc["count"];
-      
-      // Cập nhật số đếm cho đơn hàng
-      Serial.println("Update count for order " + String(orderId) + ": " + String(newCount));
-      
-      // Cập nhật totalCount nếu là đơn hàng đang active
-      totalCount = newCount;
-      needUpdate = true;
-    }
-    server.send(200, "text/plain", "OK");
-  });
-
-  // API lấy trạng thái mở rộng
-  server.on("/api/extended_status", HTTP_GET, [](){
-    DynamicJsonDocument doc(512);
-    doc["status"] = isRunning ? "RUNNING" : "STOPPED";
-    doc["count"] = totalCount;
-    doc["target"] = targetCount;
-    doc["currentType"] = bagType;
-    doc["startTime"] = startTimeStr;
-    doc["isWarning"] = false;
-    doc["conveyorId"] = "BT-001";
-    doc["ipAddress"] = ETH.localIP().toString();
-    doc["uptime"] = millis() / 1000;
-    doc["freeHeap"] = ESP.getFreeHeap();
-    
-    // Kiểm tra ngưỡng cảnh báo
-    for (auto& cfg : bagConfigs) {
-      if (cfg.type == bagType) {
-        int warningThreshold = cfg.target - cfg.warn;
-        doc["isWarning"] = (totalCount >= warningThreshold);
-        doc["warningThreshold"] = warningThreshold;
-        break;
-      }
-    }
-    
-    String out;
-    serializeJson(doc, out);
-    server.send(200, "application/json", out);
-  });
+  // API lấy trạng thái mở rộng - DEPRECATED: Merge vào /api/status
+  // server.on("/api/extended_status", HTTP_GET, [](){
+  //   // Đã merge vào /api/status với đầy đủ thông tin
+  // });
 
   // WiFi configuration endpoints
   server.on("/api/wifi/scan", HTTP_GET, [](){
@@ -1863,6 +2197,92 @@ void setupWebServer() {
     server.send(200, "application/json", out);
   });
 
+  // MQTT Control API
+  server.on("/api/mqtt/status", HTTP_GET, [](){
+    server.sendHeader("Access-Control-Allow-Origin", "*");
+    
+    DynamicJsonDocument doc(512);
+    doc["connected"] = mqtt.connected();
+    doc["server"] = mqtt_server;
+    doc["client_id"] = "ESP32_BagCounter_" + String(WiFi.macAddress()).substring(0, 8);
+    doc["last_publish"] = lastMqttPublish;
+    doc["last_heartbeat"] = lastHeartbeat;
+    
+    // Topic structure
+    JsonObject topics = doc.createNestedObject("topics");
+    JsonArray publish_topics = topics.createNestedArray("publish");
+    publish_topics.add(TOPIC_STATUS);
+    publish_topics.add(TOPIC_COUNT);
+    publish_topics.add(TOPIC_ALERTS);
+    publish_topics.add(TOPIC_SENSOR);
+    publish_topics.add(TOPIC_HEARTBEAT);
+    publish_topics.add(TOPIC_IR_CMD);
+    
+    JsonArray subscribe_topics = topics.createNestedArray("subscribe");
+    subscribe_topics.add(TOPIC_CMD_START);
+    subscribe_topics.add(TOPIC_CMD_PAUSE);
+    subscribe_topics.add(TOPIC_CMD_RESET);
+    subscribe_topics.add(TOPIC_CMD_SELECT);
+    subscribe_topics.add(TOPIC_CONFIG);
+    
+    String out;
+    serializeJson(doc, out);
+    server.send(200, "application/json", out);
+  });
+
+  server.on("/api/mqtt/publish", HTTP_POST, [](){
+    server.sendHeader("Access-Control-Allow-Origin", "*");
+    
+    if (server.hasArg("plain")) {
+      DynamicJsonDocument doc(512);
+      deserializeJson(doc, server.arg("plain"));
+      
+      String topic = doc["topic"];
+      String message = doc["message"];
+      
+      if (topic.length() > 0 && message.length() > 0) {
+        bool success = mqtt.publish(topic.c_str(), message.c_str());
+        
+        DynamicJsonDocument response(256);
+        response["success"] = success;
+        response["topic"] = topic;
+        response["message"] = message;
+        response["timestamp"] = millis();
+        
+        String out;
+        serializeJson(response, out);
+        server.send(200, "application/json", out);
+        
+        Serial.println("Manual MQTT publish: " + topic + " = " + message);
+      } else {
+        server.send(400, "application/json", "{\"error\":\"Topic and message required\"}");
+      }
+    } else {
+      server.send(400, "application/json", "{\"error\":\"No data provided\"}");
+    }
+  });
+
+  server.on("/api/mqtt/force_publish", HTTP_POST, [](){
+    server.sendHeader("Access-Control-Allow-Origin", "*");
+    
+    // Force publish tất cả dữ liệu hiện tại
+    publishStatusMQTT();
+    publishCountUpdate();
+    publishSensorData();
+    publishHeartbeat();
+    
+    DynamicJsonDocument response(256);
+    response["success"] = true;
+    response["message"] = "All MQTT topics published";
+    response["timestamp"] = millis();
+    
+    String out;
+    serializeJson(response, out);
+    server.send(200, "application/json", out);
+    
+    Serial.println(" Force published all MQTT topics");
+  });
+
   server.begin();
   Serial.println("WebServer started");
 }
@@ -1992,17 +2412,20 @@ void updateCount() {
   if (!isLimitReached) {
     totalCount++;
     
+    // MQTT: Publish count update ngay lập tức
+    publishCountUpdate();
+    
     // Kiểm tra ngưỡng cảnh báo và cập nhật đèn DONE
     for (auto& cfg : bagConfigs) {
       if (cfg.type == bagType) {
         int warningThreshold = cfg.target - cfg.warn;
-        if (totalCount >= warningThreshold) {
+        if (totalCount >= warningThreshold && totalCount < targetCount) {
           Serial.println("Đạt ngưỡng cảnh báo!");
-          Serial.print("isRunning trước khi cập nhật DONE: ");
-          Serial.println(isRunning);
-          updateDoneLED();  // Cập nhật đèn DONE khi đạt ngưỡng cảnh báo
-          Serial.print("isRunning sau khi cập nhật DONE: ");
-          Serial.println(isRunning);
+          
+          // MQTT: Publish warning alert
+          publishAlert("WARNING", "Đạt ngưỡng cảnh báo: " + String(totalCount) + "/" + String(targetCount));
+          
+          updateDoneLED();
         }
         break;
       }
@@ -2015,9 +2438,11 @@ void updateCount() {
       blinkCount = 0;
       isBlinking = true;
       lastBlink = millis();
+      
       // Lưu lịch sử với thêm thông tin loại - chỉ khi có thời gian thực
       String currentTime = (time(nullptr) > 24 * 3600) ? getTimeStr() : "Time not synced";
       history.push_back({currentTime, (int)totalCount, bagType});
+      
       // Đánh dấu DONE cho loại hiện tại
       for (auto& c : bagConfigs) {
         if (c.type == bagType) {
@@ -2026,10 +2451,17 @@ void updateCount() {
         }
       }
       saveBagConfigsToFile();
-      // Publish MQTT
+      
+      // MQTT: Publish completion alert
+      publishAlert("COMPLETED", "Hoàn thành đơn hàng: " + bagType + " - " + String(totalCount) + " bao");
+      
+      // MQTT: Publish final status
+      publishStatusMQTT();
+      
+      // Legacy MQTT (giữ lại để tương thích)
       DynamicJsonDocument doc(256);
       doc["count"] = totalCount;
-      doc["time"] = (time(nullptr) > 24 * 3600) ? getTimeStr() : "Time not synced";
+      doc["time"] = currentTime;
       doc["type"] = bagType;
       String msg;
       serializeJson(doc, msg);
@@ -2267,7 +2699,41 @@ void loop() {
     Serial.println(startTimeStr);
   }
   
+  // 📡 MQTT Management
+  if (!mqtt.connected()) {
+    // Thử kết nối lại MQTT nếu mất kết nối
+    static unsigned long lastReconnectAttempt = 0;
+    if (millis() - lastReconnectAttempt > 5000) { // Thử 5 giây một lần
+      lastReconnectAttempt = millis();
+      Serial.println("🔄 Attempting MQTT reconnection...");
+      setupMQTT();
+    }
+  } else {
+    // MQTT connected - handle messages
+    mqtt.loop();
+    
+    // Publish periodic updates
+    if (millis() - lastMqttPublish > MQTT_PUBLISH_INTERVAL) {
+      publishStatusMQTT();
+      
+      // Publish sensor data nếu đang hoạt động
+      if (isCountingEnabled || isTriggerEnabled) {
+        publishSensorData();
+      }
+      
+      lastMqttPublish = millis();
+    }
+    
+    // Publish heartbeat
+    if (millis() - lastHeartbeat > HEARTBEAT_INTERVAL) {
+      publishHeartbeat();
+      lastHeartbeat = millis();
+    }
+  }
+  
   server.handleClient();
-  mqtt.loop();
 }
 //<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+
+
+

@@ -1,4 +1,4 @@
-// Global variables
+﻿// Global variables
 let currentMode = 'output'; // 'input' or 'output'
 let orderBatches = []; // Array of order batches
 let currentBatchId = null;
@@ -17,6 +17,16 @@ let currentPage = 1;
 let itemsPerPage = 10;
 let totalPages = 1;
 
+// MQTT Configuration
+let mqttClient = null;
+let mqttConnected = false;
+let currentDeviceStatus = {};
+let lastMqttUpdate = 0;
+
+// API polling configuration (reduced frequency for management data only)
+let apiPollingInterval = null;
+const API_POLL_FREQUENCY = 30000; // 30 seconds instead of 1 second - only for management data
+
 let settings = {
   conveyorName: 'BT-001',
   ipAddress: '192.168.1.200',
@@ -31,6 +41,8 @@ let settings = {
 
 // Initialize application
 document.addEventListener('DOMContentLoaded', function() {
+  console.log('Starting application with MQTT + optimized API...');
+  
   loadSettings();
   loadProducts();
   loadOrderBatches();
@@ -41,7 +53,14 @@ document.addEventListener('DOMContentLoaded', function() {
   updateBatchDisplay();
   updateOverview();
   showTab('overview');
-  startStatusPolling(); // Bắt đầu polling status từ ESP32
+  
+  // Initialize MQTT Client (preferred for real-time data)
+  initMQTTClient();
+  
+  // Start reduced API polling for management data only (30s interval)
+  setTimeout(() => {
+    startManagementAPIPolling();
+  }, 2000); // Delay to let MQTT connect first
   
   // Sync products to ESP32 on page load
   syncAllProductsToESP32();
@@ -55,7 +74,465 @@ document.addEventListener('DOMContentLoaded', function() {
       settings.brightness = parseInt(this.value);
     });
   }
+  
+  console.log('Application initialized');
 });
+
+// MQTT Client Setup  
+function initMQTTClient() {
+  try {
+    // Use WebSockets MQTT client (you'll need to include mqtt.js library)
+    // For now, we'll implement a fallback approach
+    console.log('Attempting MQTT WebSocket connection...');
+    
+    // Try to connect via WebSocket MQTT (if available)
+    if (typeof mqtt !== 'undefined') {
+      // Use same broker as ESP32 - test.mosquitto.org with WebSocket port
+      const brokerUrl = 'wss://test.mosquitto.org:8081'; // WebSocket Secure port
+      console.log('Connecting to MQTT broker:', brokerUrl);
+      
+      mqttClient = mqtt.connect(brokerUrl, {
+        clientId: `WebClient_${Date.now()}`,
+        keepalive: 30,
+        reconnectPeriod: 5000
+      });
+      
+      mqttClient.on('connect', function() {
+        console.log('MQTT Connected!');
+        mqttConnected = true;
+        updateMQTTStatus(true);
+        
+        // Subscribe to all relevant topics
+        subscribeMQTTTopics();
+      });
+      
+      mqttClient.on('message', function(topic, message) {
+        try {
+          const data = JSON.parse(message.toString());
+          handleMQTTMessage(topic, data).catch(error => {
+            console.error('MQTT message handler error:', error);
+          });
+        } catch (error) {
+          console.error('MQTT message parse error:', error);
+        }
+      });
+      
+      mqttClient.on('error', function(error) {
+        console.error('MQTT Error:', error);
+        mqttConnected = false;
+        updateMQTTStatus(false);
+        // Fallback to API-only mode
+        startStatusPollingFallback();
+      });
+      
+      mqttClient.on('disconnect', function() {
+        console.log('MQTT Disconnected');
+        mqttConnected = false;
+        updateMQTTStatus(false);
+      });
+      
+    } else {
+      console.log('MQTT library not available, using API-only mode');
+      startStatusPollingFallback();
+    }
+    
+  } catch (error) {
+    console.error('Failed to initialize MQTT client:', error);
+    console.log('Falling back to API-only mode');
+    startStatusPollingFallback();
+  }
+}
+
+function subscribeMQTTTopics() {
+  if (!mqttClient || !mqttConnected) return;
+  
+  const topics = [
+    'bagcounter/status',
+    'bagcounter/count', 
+    'bagcounter/alerts',
+    'bagcounter/sensor',
+    'bagcounter/heartbeat'
+    // NOTE: NOT subscribing to 'bagcounter/ir_command' to avoid command loops
+  ];
+  
+  topics.forEach(topic => {
+    mqttClient.subscribe(topic, function(err) {
+      if (err) {
+        console.error(`Failed to subscribe to ${topic}:`, err);
+      } else {
+        console.log(`Subscribed to ${topic}`);
+      }
+    });
+  });
+}
+
+// Handle MQTT Messages
+async function handleMQTTMessage(topic, data) {
+  lastMqttUpdate = Date.now();
+  //console.log('MQTT Message:', topic, data);
+  
+  switch (topic) {
+    case 'bagcounter/status':
+      await updateDeviceStatus(data);
+      updateDisplayElements(data);
+      break;
+      
+    case 'bagcounter/count':
+      await handleCountUpdate(data);
+      break;
+      
+    case 'bagcounter/alerts':
+      handleDeviceAlert(data);
+      break;
+      
+    case 'bagcounter/sensor':
+      updateSensorStatus(data);
+      break;
+      
+    case 'bagcounter/heartbeat':
+      updateHeartbeat(data);
+      break;
+      
+    // NOTE: Removed bagcounter/ir_command handling to prevent command loops
+    // IR commands are handled locally on ESP32, web only receives status updates
+    
+    default:
+      console.log('Unknown MQTT topic:', topic);
+  }
+}
+
+// MQTT Message Handlers  
+async function updateDeviceStatus(data) {
+  currentDeviceStatus = { ...currentDeviceStatus, ...data };
+  
+  // Sync device status with web counting state
+  if (data.status) {
+    console.log('Syncing device status:', data.status, 'with web state:', countingState.isActive);
+    
+    if (data.status === 'RUNNING' && !countingState.isActive) {
+      console.log('IR Remote START detected - updating web state');
+      countingState.isActive = true;
+      
+      // Find active batch and set a counting order if none
+      const activeBatch = orderBatches.find(b => b.isActive);
+      if (activeBatch) {
+        const selectedOrders = activeBatch.orders.filter(o => o.selected);
+        if (selectedOrders.length > 0) {
+          // Set first waiting/paused order to counting
+          const orderToStart = selectedOrders.find(o => o.status === 'waiting' || o.status === 'paused');
+          if (orderToStart) {
+            orderToStart.status = 'counting';
+            countingState.currentOrderIndex = selectedOrders.indexOf(orderToStart);
+            console.log('Set order to counting:', countingState.currentOrderIndex + 1);
+            saveOrderBatches();
+            updateOrderTable();
+          }
+        }
+      }
+      updateOverview();
+      
+    } else if (data.status === 'PAUSE') {
+      console.log('PAUSE detected - updating web state');
+      countingState.isActive = false;
+      
+      // Set counting orders to paused
+      const activeBatch = orderBatches.find(b => b.isActive);
+      if (activeBatch) {
+        activeBatch.orders.forEach(order => {
+          if (order.status === 'counting') {
+            order.status = 'paused';
+          }
+        });
+        saveOrderBatches();
+        updateOrderTable();
+      }
+      updateOverview();
+      
+    } else if (data.status === 'RESET') {
+      console.log('RESET detected - resetting all orders');
+      
+      // Chỉ xử lý nếu chưa reset hoặc đang active
+      if (countingState.isActive || countingState.totalCounted > 0) {
+        countingState.isActive = false;
+        countingState.currentOrderIndex = 0;
+        countingState.totalPlanned = 0;
+        countingState.totalCounted = 0;
+        
+        // Reset tất cả đơn hàng
+        const activeBatch = orderBatches.find(b => b.isActive);
+        if (activeBatch) {
+          const selectedOrders = activeBatch.orders.filter(o => o.selected);
+          selectedOrders.forEach(order => {
+            order.status = 'waiting';
+            order.currentCount = 0;
+          });
+          saveOrderBatches();
+          updateOrderTable();
+        }
+        updateOverview();
+        showNotification('Reset đếm hoàn tất', 'info');
+      }
+    }
+  }
+  
+  updateStatusIndicators(data);
+  updateControlButtons(data);
+  
+  // Also update count and display
+  if (data.count !== undefined) {
+    await updateStatusFromDevice(data);
+  }
+  
+  // Update display elements
+  updateDisplayElements(data);
+}
+
+async function handleCountUpdate(data) {
+  console.log('Count update from MQTT:', data);
+  if (data.count !== undefined) {
+    await updateStatusFromDevice(data);
+  }
+}
+
+function handleDeviceAlert(data) {
+  console.log('Device Alert:', data);
+  
+  switch (data.alertType) {
+    case 'WARNING':
+      showNotification(`${data.message}`, 'warning');
+      break;
+    case 'COMPLETED':
+      showNotification(`${data.message}`, 'success');
+      // REMOVE handleOrderCompletion từ alert - để logic chính xác trong updateStatusFromDevice
+      console.log('COMPLETED alert received but ignored - using updateStatusFromDevice logic instead');
+      // handleOrderCompletion(data);
+      break;
+    case 'ERROR':
+      showNotification(`${data.message}`, 'error');
+      break;
+    case 'IR_COMMAND':
+      showNotification(`${data.message}`, 'info');
+      break;
+  }
+}
+
+function updateSensorStatus(data) {
+  //console.log('Sensor update:', data);
+  // Update sensor status indicators in UI
+}
+
+function updateHeartbeat(data) {
+  console.log('Device heartbeat:', data);
+  // Update device online status
+  const onlineIndicator = document.getElementById('deviceOnline');
+  if (onlineIndicator) {
+    onlineIndicator.textContent = 'Online';
+    onlineIndicator.style.color = 'green';
+  }
+}
+
+function handleIRRemoteCommand(data) {
+  console.log('IR Remote command from MQTT:', data);
+  
+  if (data.action === 'START') {
+    console.log('IR Remote START - calling startCounting()');
+    startCounting();
+  } else if (data.action === 'PAUSE') {
+    console.log('IR Remote PAUSE - calling pauseCounting()');
+    pauseCounting();
+  } else if (data.action === 'RESET') {
+    console.log('IR Remote RESET - calling resetCounting()');
+    resetCounting();
+  }
+}
+
+// MQTT Command Functions
+function sendMQTTCommand(topic, payload) {
+  if (!mqttClient || !mqttConnected) {
+    console.log('MQTT not connected, command not sent');
+    return false;
+  }
+  
+  try {
+    const message = JSON.stringify(payload);
+    mqttClient.publish(topic, message);
+    console.log(`MQTT Command sent: ${topic}`, payload);
+    return true;
+  } catch (error) {
+    console.error('Failed to send MQTT command:', error);
+    return false;
+  }
+}
+
+function startCountingMQTT() {
+  return sendMQTTCommand('bagcounter/cmd/start', {
+    timestamp: Date.now(),
+    source: 'web'
+  });
+}
+
+function pauseCountingMQTT() {
+  return sendMQTTCommand('bagcounter/cmd/pause', {
+    timestamp: Date.now(),
+    source: 'web'
+  });
+}
+
+function resetCountingMQTT() {
+  return sendMQTTCommand('bagcounter/cmd/reset', {
+    timestamp: Date.now(),
+    source: 'web'
+  });
+}
+
+function selectOrderMQTT(orderData) {
+  return sendMQTTCommand('bagcounter/cmd/select', {
+    type: orderData.productName,
+    target: orderData.quantity,
+    warn: orderData.warningQuantity,
+    timestamp: Date.now(),
+    source: 'web'
+  });
+}
+
+function updateConfigMQTT(configData) {
+  return sendMQTTCommand('bagcounter/config/update', {
+    ...configData,
+    timestamp: Date.now(),
+    source: 'web'
+  });
+}
+
+// Management API Polling (Reduced Frequency - Only for CRUD operations)
+function startManagementAPIPolling() {
+  if (apiPollingInterval) {
+    clearInterval(apiPollingInterval);
+  }
+  
+  // Only poll for management data (orders, products, settings) - NOT real-time status
+  apiPollingInterval = setInterval(async () => {
+    try {
+      await loadManagementData();
+    } catch (error) {
+      console.error('Management API polling error:', error);
+    }
+  }, API_POLL_FREQUENCY);
+  
+  console.log(`Management API polling started (${API_POLL_FREQUENCY/1000}s interval)`);
+}
+
+async function loadManagementData() {
+  try {
+    // Load orders, products, settings - NOT real-time status
+    const [ordersResponse, productsResponse, settingsResponse] = await Promise.all([
+      fetch('/api/orders').catch(() => null),
+      fetch('/api/products').catch(() => null),
+      fetch('/api/settings').catch(() => null)
+    ]);
+    
+    if (ordersResponse?.ok) {
+      const orders = await ordersResponse.json();
+      // Update order management if needed
+    }
+    
+    if (productsResponse?.ok) {
+      const products = await productsResponse.json();
+      currentProducts = products;
+      updateProductTable();
+    }
+    
+    if (settingsResponse?.ok) {
+      const settingsData = await settingsResponse.json();
+      settings = { ...settings, ...settingsData };
+      updateSettingsForm();
+    }
+    
+  } catch (error) {
+    console.error('Error loading management data:', error);
+  }
+}
+
+// Fallback to old API polling if MQTT fails
+function startStatusPollingFallback() {
+  console.log('Starting fallback API polling for real-time data...');
+  startStatusPolling(); // Use the original function as fallback
+}
+
+// UI Update Functions
+function updateMQTTStatus(connected) {
+  const statusElement = document.getElementById('mqttStatus');
+  if (statusElement) {
+    statusElement.textContent = connected ? 'MQTT Connected' : 'API Mode';
+    statusElement.style.color = connected ? 'green' : 'orange';
+  }
+}
+
+function updateStatusIndicators(data) {
+  // Update status indicators in UI
+  const statusElement = document.getElementById('currentStatus');
+  if (statusElement) {
+    statusElement.textContent = data.status || 'UNKNOWN';
+    statusElement.className = `status-${(data.status || 'unknown').toLowerCase()}`;
+  }
+  
+  const countElement = document.getElementById('currentCount');
+  if (countElement) {
+    countElement.textContent = data.count || 0;
+  }
+  
+  const targetElement = document.getElementById('currentTarget');
+  if (targetElement) {
+    targetElement.textContent = data.target || 0;
+  }
+}
+
+function updateControlButtons(data) {
+  // Update button states based on device status
+  const startBtn = document.getElementById('startBtn');
+  const pauseBtn = document.getElementById('pauseBtn');
+  const resetBtn = document.getElementById('resetBtn');
+  
+  if (startBtn && pauseBtn && resetBtn) {
+    const isRunning = data.status === 'RUNNING';
+    startBtn.disabled = isRunning;
+    pauseBtn.disabled = !isRunning;
+    resetBtn.disabled = false;
+  }
+}
+
+function handleOrderCompletion(data) {
+  console.log('Order completion detected:', data);
+  
+  // Handle order completion logic
+  const activeBatch = orderBatches.find(b => b.isActive);
+  if (activeBatch && countingState.isActive) {
+    const currentOrder = activeBatch.orders.find(o => o.status === 'counting');
+    if (currentOrder) {
+      currentOrder.status = 'completed';
+      // KHÔNG gán data.count trực tiếp - sử dụng quantity target thay vì total count
+      currentOrder.currentCount = currentOrder.quantity;
+      
+      console.log(`Order completion - Set currentCount to target quantity: ${currentOrder.quantity}`);
+      
+      // Add to history
+      countingHistory.push({
+        timestamp: new Date().toISOString(),
+        customerName: currentOrder.customerName,
+        productName: currentOrder.product.name,
+        plannedQuantity: currentOrder.quantity,
+        actualCount: currentOrder.currentCount
+      });
+      
+      saveOrderBatches();
+      saveHistory();
+      updateOrderTable();
+      updateOverview();
+      
+      // Move to next order
+      moveToNextOrder();
+    }
+  }
+}
 
 // Batch Management
 function createNewBatch() {
@@ -623,16 +1100,48 @@ function getStatusDisplay(status) {
 }
 
 // Counting Control (Updated)
-function startCounting() {
-  const activeBatch = orderBatches.find(b => b.isActive);
+// 🔄 Hybrid Functions (MQTT preferred, API fallback)
+async function startCounting() {
+  console.log('Starting counting...');
+  console.log('Current orderBatches:', orderBatches);
+  
+  let activeBatch = orderBatches.find(b => b.isActive);
+  console.log('Active batch:', activeBatch);
+  
+  // Nếu không có batch active, thử active batch đầu tiên có orders
+  if (!activeBatch && orderBatches.length > 0) {
+    const batchWithOrders = orderBatches.find(b => b.orders && b.orders.length > 0);
+    if (batchWithOrders) {
+      // Deactivate all batches first
+      orderBatches.forEach(b => b.isActive = false);
+      // Activate the batch with orders
+      batchWithOrders.isActive = true;
+      activeBatch = batchWithOrders;
+      saveOrderBatches();
+      updateBatchSelector();
+      console.log('Auto-activated batch:', activeBatch.name);
+    }
+  }
+  
   if (!activeBatch) {
-    alert('Vui lòng chọn danh sách đơn hàng');
+    showNotification('Vui lòng chọn danh sách đơn hàng trước', 'warning');
     return;
   }
   
-  const selectedOrders = activeBatch.orders.filter(o => o.selected);
+  let selectedOrders = activeBatch.orders.filter(o => o.selected);
+  console.log('Selected orders:', selectedOrders);
+  
+  // Nếu không có đơn hàng nào được chọn, auto-select tất cả
+  if (selectedOrders.length === 0 && activeBatch.orders.length > 0) {
+    activeBatch.orders.forEach(order => order.selected = true);
+    selectedOrders = activeBatch.orders;
+    saveOrderBatches();
+    updateOrderTable();
+    console.log('Auto-selected all orders:', selectedOrders.length);
+  }
+  
   if (selectedOrders.length === 0) {
-    alert('Vui lòng chọn ít nhất một đơn hàng để đếm');
+    showNotification('Không có đơn hàng nào để đếm', 'warning');
     return;
   }
   
@@ -673,26 +1182,136 @@ function startCounting() {
   console.log('Bat dau dem tu don:', currentOrderIndex + 1, 'cua', selectedOrders.length);
   console.log('Tong ke hoach:', countingState.totalPlanned);
   console.log('Da dem:', countingState.totalCounted);
+  console.log('MQTT connected:', mqttConnected);
   
-  // GỬI LỆNH ĐẾN ESP32 VỚI ĐƠN HÀNG HIỆN TẠI
-  const currentOrder = selectedOrders[currentOrderIndex];
-  sendESP32Command('start', {
-    orderCode: currentOrder.orderCode,
-    customerName: currentOrder.customerName,
-    productName: currentOrder.product.name,
-    target: currentOrder.quantity,
-    warningQuantity: currentOrder.warningQuantity,
-    totalTarget: countingState.totalPlanned,
-    isMultiOrder: selectedOrders.length > 1,
-    currentOrderIndex: currentOrderIndex,
+  // Tính tổng target cho toàn bộ batch
+  const totalTarget = selectedOrders.reduce((sum, order) => sum + order.quantity, 0);
+  const batchInfo = {
+    totalTarget: totalTarget,
     totalOrders: selectedOrders.length,
-    currentCount: countingState.totalCounted
-  });
+    currentOrderIndex: currentOrderIndex,
+    // Gửi thông tin đơn đầu tiên để ESP32 hiển thị
+    firstOrder: {
+      customerName: selectedOrders[currentOrderIndex].customerName,
+      productName: selectedOrders[currentOrderIndex].product.name,
+      orderCode: selectedOrders[currentOrderIndex].orderCode,
+      quantity: selectedOrders[currentOrderIndex].quantity
+    }
+  };
   
-  saveOrderBatches();
-  updateOrderTable();
-  updateOverview();
-  showNotification(`Bat dau dem don ${currentOrderIndex + 1}/${selectedOrders.length}: ${currentOrder.customerName}`, 'success');
+  console.log('Sending batch info to ESP32:', batchInfo);
+  
+  try {
+    // Try MQTT first
+    if (mqttConnected) {
+      console.log('Sending MQTT start command...');
+      const success = startCountingMQTT();
+      if (!success) {
+        console.log('MQTT start failed, trying API...');
+        await sendESP32Command('start', batchInfo);
+      } else {
+        console.log('MQTT start command sent successfully');
+        // Gửi thông tin batch qua API song song với MQTT
+        await sendESP32Command('batch_info', batchInfo);
+      }
+    } else {
+      console.log('MQTT not connected, using API...');
+      await sendESP32Command('start', batchInfo);
+    }
+    
+    saveOrderBatches();
+    updateOrderTable();
+    updateOverview();
+    
+    showNotification('Bắt đầu đếm thành công', 'success');
+    
+  } catch (error) {
+    console.error('Start counting error:', error);
+    showNotification(`Lỗi bắt đầu đếm: ${error.message}`, 'error');
+  }
+}
+
+async function pauseCounting() {
+  console.log('⏸Pausing counting...');
+  console.log('MQTT connected:', mqttConnected);
+  
+  try {
+    // Try MQTT first
+    if (mqttConnected) {
+      console.log('Sending MQTT pause command...');
+      const success = pauseCountingMQTT();
+      if (!success) {
+        console.log('MQTT pause failed, trying API...');
+        await sendESP32Command('pause');
+      } else {
+        console.log('MQTT pause command sent successfully');
+      }
+    } else {
+      console.log('MQTT not connected, using API...');
+      await sendESP32Command('pause');
+    }
+    
+    countingState.isActive = false;
+    updateOverview();
+    
+    showNotification('⏸️ Đã tạm dừng đếm', 'info');
+    
+  } catch (error) {
+    console.error('Pause counting error:', error);
+    showNotification(`Lỗi tạm dừng: ${error.message}`, 'error');
+  }
+}
+
+async function resetCounting() {
+  console.log('Resetting counting...');
+  console.log('MQTT connected:', mqttConnected);
+  
+  if (!confirm('Bạn có chắc chắn muốn reset hệ thống đếm?')) {
+    return;
+  }
+  
+  try {
+    // Try MQTT first
+    if (mqttConnected) {
+      console.log('Sending MQTT reset command...');
+      const success = resetCountingMQTT();
+      if (!success) {
+        console.log('MQTT reset failed, trying API...');
+        await sendESP32Command('reset');
+      } else {
+        console.log('MQTT reset command sent successfully');
+      }
+    } else {
+      console.log('MQTT not connected, using API...');
+      await sendESP32Command('reset');
+    }
+    
+    // Reset local state
+    countingState.isActive = false;
+    countingState.currentOrderIndex = 0;
+    countingState.totalCounted = 0;
+    
+    // Reset all order statuses
+    const activeBatch = orderBatches.find(b => b.isActive);
+    if (activeBatch) {
+      activeBatch.orders.forEach(order => {
+        if (order.selected) {
+          order.status = 'waiting';
+          order.currentCount = 0;
+        }
+      });
+    }
+    
+    saveOrderBatches();
+    updateOrderTable();
+    updateOverview();
+    
+    showNotification('Đã reset hệ thống', 'success');
+    
+  } catch (error) {
+    console.error('Reset counting error:', error);
+    showNotification(`Lỗi reset: ${error.message}`, 'error');
+  }
 }
 
 // Hàm gửi thông tin batch để ESP32 biết (optional)
@@ -720,19 +1339,19 @@ async function sendBatchInfoToESP32(orders) {
     });
     
     if (response.ok) {
-      console.log('✅ Đã gửi thông tin batch đến ESP32');
+      console.log('Đã gửi thông tin batch đến ESP32');
     } else {
-      console.log('⚠️ Không gửi được thông tin batch (không quan trọng)');
+      console.log('Không gửi được thông tin batch (không quan trọng)');
     }
   } catch (error) {
-    console.log('⚠️ Lỗi gửi batch info (không quan trọng):', error.message);
+    console.log('Lỗi gửi batch info (không quan trọng):', error.message);
   }
 }
 
 // Hàm gửi toàn bộ danh sách đơn hàng đến ESP32
 async function sendBatchOrdersToESP32(orders) {
   try {
-    console.log('📤 Gửi danh sách', orders.length, 'đơn hàng đến ESP32...');
+    console.log('Gửi danh sách', orders.length, 'đơn hàng đến ESP32...');
     
     // Thử gửi qua endpoint batch_orders trước
     const batchData = {
@@ -760,19 +1379,19 @@ async function sendBatchOrdersToESP32(orders) {
       
       if (response.ok) {
         const result = await response.text();
-        console.log('✅ Danh sách đơn hàng đã gửi thành công đến ESP32 (batch):', result);
-        showNotification(`✅ Đã gửi ${orders.length} đơn hàng đến ESP32`, 'success');
+        console.log('Danh sách đơn hàng đã gửi thành công đến ESP32 (batch):', result);
+        showNotification(`Đã gửi ${orders.length} đơn hàng đến ESP32`, 'success');
         return true;
       } else if (response.status === 404) {
         // Endpoint không tồn tại, fallback sang gửi từng đơn
-        console.log('⚠️ Endpoint batch_orders không tồn tại, gửi từng đơn hàng...');
+        console.log('Endpoint batch_orders không tồn tại, gửi từng đơn hàng...');
         return await sendOrdersOneByOne(orders);
       } else {
         throw new Error(`HTTP error! status: ${response.status}`);
       }
     } catch (fetchError) {
       if (fetchError.message.includes('404') || fetchError.message.includes('Not Found')) {
-        console.log('⚠️ Endpoint batch_orders không tồn tại, gửi từng đơn hàng...');
+        console.log('Endpoint batch_orders không tồn tại, gửi từng đơn hàng...');
         return await sendOrdersOneByOne(orders);
       } else {
         throw fetchError;
@@ -780,8 +1399,8 @@ async function sendBatchOrdersToESP32(orders) {
     }
     
   } catch (error) {
-    console.error('❌ Lỗi gửi danh sách đơn hàng đến ESP32:', error);
-    showNotification('❌ Lỗi gửi danh sách đến ESP32: ' + error.message, 'error');
+    console.error('Lỗi gửi danh sách đơn hàng đến ESP32:', error);
+    showNotification('Lỗi gửi danh sách đến ESP32: ' + error.message, 'error');
     return false;
   }
 }
@@ -789,12 +1408,12 @@ async function sendBatchOrdersToESP32(orders) {
 // Hàm fallback: gửi từng đơn hàng một
 async function sendOrdersOneByOne(orders) {
   try {
-    console.log('📤 Gửi từng đơn hàng (fallback mode)...');
+    console.log('Gửi từng đơn hàng (fallback mode)...');
     let successCount = 0;
     
     for (let i = 0; i < orders.length; i++) {
       const order = orders[i];
-      console.log(`📤 Gửi đơn ${i + 1}/${orders.length}: ${order.customerName} - ${order.product.name}`);
+      console.log(`Gửi đơn ${i + 1}/${orders.length}: ${order.customerName} - ${order.product.name}`);
       
       const result = await sendOrderToESP32(order);
       if (result) {
@@ -807,70 +1426,20 @@ async function sendOrdersOneByOne(orders) {
     }
     
     if (successCount === orders.length) {
-      console.log('✅ Tất cả đơn hàng đã được gửi thành công (fallback)');
-      showNotification(`✅ Đã gửi ${successCount}/${orders.length} đơn hàng đến ESP32`, 'success');
+      console.log('Tất cả đơn hàng đã được gửi thành công (fallback)');
+      showNotification(`Đã gửi ${successCount}/${orders.length} đơn hàng đến ESP32`, 'success');
       return true;
     } else {
-      console.warn(`⚠️ Chỉ gửi được ${successCount}/${orders.length} đơn hàng`);
-      showNotification(`⚠️ Chỉ gửi được ${successCount}/${orders.length} đơn hàng`, 'warning');
+      console.warn(`Chỉ gửi được ${successCount}/${orders.length} đơn hàng`);
+      showNotification(`Chỉ gửi được ${successCount}/${orders.length} đơn hàng`, 'warning');
       return successCount > 0; // Trả về true nếu ít nhất 1 đơn thành công
     }
     
   } catch (error) {
-    console.error('❌ Lỗi trong fallback mode:', error);
-    showNotification('❌ Lỗi gửi đơn hàng: ' + error.message, 'error');
+    console.error('Lỗi trong fallback mode:', error);
+    showNotification('Lỗi gửi đơn hàng: ' + error.message, 'error');
     return false;
   }
-}
-
-function pauseCounting() {
-  const activeBatch = orderBatches.find(b => b.isActive);
-  if (!activeBatch) return;
-  
-  const selectedOrders = activeBatch.orders.filter(o => o.selected);
-  
-  countingState.isActive = false;
-  
-  // Send pause command to ESP32
-  sendESP32Command('pause');
-  
-  // Cập nhật trạng thái đơn hàng giống như IR Remote
-  selectedOrders.forEach(order => {
-    if (order.status === 'counting') {
-      order.status = 'paused';
-    }
-  });
-  
-  saveOrderBatches();
-  updateOrderTable();
-  updateOverview();
-  showNotification('Tam dung dem tu Web', 'warning');
-}
-
-function resetCounting() {
-  const activeBatch = orderBatches.find(b => b.isActive);
-  if (!activeBatch) return;
-  
-  const selectedOrders = activeBatch.orders.filter(o => o.selected);
-  
-  countingState.isActive = false;
-  countingState.currentOrderIndex = 0;
-  countingState.totalPlanned = 0;
-  countingState.totalCounted = 0;
-  
-  // Send reset command to ESP32
-  sendESP32Command('reset');
-  
-  // Reset tất cả đơn hàng giống như IR Remote
-  selectedOrders.forEach(order => {
-    order.status = 'waiting';
-    order.currentCount = 0;
-  });
-  
-  saveOrderBatches();
-  updateOrderTable();
-  updateOverview();
-  showNotification('Reset dem tu Web', 'info');
 }
 
 // Product Management (Updated)
@@ -1039,27 +1608,104 @@ function updateOverview() {
 
 // History Management (Updated)
 function loadHistory() {
+  console.log('Loading history from localStorage...');
   const saved = localStorage.getItem('countingHistory');
+  console.log('Raw localStorage data:', saved);
+  
   if (saved) {
-    countingHistory = JSON.parse(saved);
+    try {
+      countingHistory = JSON.parse(saved);
+      console.log('Parsed history:', countingHistory.length, 'entries');
+      console.log('History data:', countingHistory);
+    } catch (error) {
+      console.error('Error parsing history:', error);
+      countingHistory = [];
+    }
+  } else {
+    console.log('No saved history found');
+    countingHistory = [];
   }
   updateHistoryTable();
 }
 
 function saveHistory() {
+  // Giới hạn tối đa 50 entries (FIFO)
+  if (countingHistory.length > 50) {
+    countingHistory = countingHistory.slice(-50); // Giữ 50 entries mới nhất
+    console.log('History trimmed to 50 entries (FIFO)');
+  }
+  
   localStorage.setItem('countingHistory', JSON.stringify(countingHistory));
+  console.log('History saved to localStorage:', countingHistory.length, 'entries');
+  
+  // Gửi lịch sử đến ESP32
+  sendHistoryToESP32();
+}
+
+// Gửi lịch sử đến ESP32 (tối đa 50 entries) - CHỈ QUA API
+async function sendHistoryToESP32() {
+  try {
+    // Chỉ gửi 50 entries mới nhất
+    const historyToSend = countingHistory.slice(-50);
+    
+    console.log('Sending', historyToSend.length, 'history entries to ESP32 via API...');
+    
+    const payload = {
+      cmd: 'update_history',
+      history: historyToSend.map(entry => ({
+        timestamp: entry.timestamp,
+        customerName: entry.customerName || 'N/A',
+        productName: entry.productName || 'N/A', 
+        orderCode: entry.orderCode || 'N/A',
+        vehicleNumber: entry.vehicleNumber || 'N/A',
+        plannedQuantity: entry.plannedQuantity || 0,
+        actualCount: entry.actualCount || 0
+      })),
+      maxEntries: 50
+    };
+    
+    const response = await fetch('/api/cmd', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(payload)
+    });
+    
+    if (response.ok) {
+      console.log('History sent to ESP32 successfully via API');
+    } else {
+      console.warn('Failed to send history to ESP32:', response.status);
+    }
+    
+  } catch (error) {
+    console.error('Error sending history to ESP32:', error);
+    // Không báo lỗi cho user vì đây là background sync
+  }
 }
 
 function updateHistoryTable() {
+  console.log('🔄 updateHistoryTable called');
+  console.log('📊 countingHistory length:', countingHistory.length);
+  console.log('📊 countingHistory data:', countingHistory);
+  
   const tbody = document.getElementById('historyTableBody');
-  if (!tbody) return;
+  console.log('📊 historyTableBody element:', tbody);
+  
+  if (!tbody) {
+    console.error('historyTableBody element not found!');
+    return;
+  }
   
   tbody.innerHTML = '';
   
   if (countingHistory.length === 0) {
+    console.log('No history data, showing empty message');
     tbody.innerHTML = '<tr><td colspan="7" class="text-center">Chưa có lịch sử đếm</td></tr>';
     return;
   }
+  
+  console.log('Processing', countingHistory.length, 'history entries');
   
   // Sắp xếp theo thời gian mới nhất
   const sortedHistory = [...countingHistory].sort((a, b) => 
@@ -1075,35 +1721,40 @@ function updateHistoryTable() {
     // Kiểm tra xem có phải là batch không
     const isBatch = entry.isBatch || entry.customerName.includes('📦');
     
+    // Xác định class CSS cho accuracy
+    let accuracyClass = 'accuracy-good';
+    if (accuracy < 95) accuracyClass = 'accuracy-warning';
+    if (accuracy < 90) accuracyClass = 'accuracy-error';
+    
     row.innerHTML = `
-      <td>${new Date(entry.timestamp).toLocaleString('vi-VN')}</td>
+      <td style="font-weight: 500;">${new Date(entry.timestamp).toLocaleString('vi-VN')}</td>
       <td>
+        ${isBatch ? '<span class="batch-indicator">📦 BATCH</span>' : ''}
         <strong>${entry.customerName}</strong>
-        ${entry.orderCode ? `<br><small style="color: #666;">Mã: ${entry.orderCode}</small>` : ''}
+        ${entry.orderCode ? `<br><small style="color: #666; font-size: 12px;">Mã: ${entry.orderCode}</small>` : ''}
       </td>
-      <td>${entry.vehicleNumber || 'N/A'}</td>
-      <td>${entry.productName}</td>
-      <td><strong>${entry.plannedQuantity}</strong></td>
-      <td>
-        <span style="color: ${isAccurate ? 'green' : 'red'}; font-weight: bold;">
+      <td style="text-align: center;">${entry.vehicleNumber || 'N/A'}</td>
+      <td style="font-weight: 500;">${entry.productName}</td>
+      <td class="number-cell" style="color: #333;">${entry.plannedQuantity}</td>
+      <td class="number-cell">
+        <span style="color: ${isAccurate ? '#4CAF50' : '#f44336'}; font-weight: bold;">
           ${entry.actualCount}
         </span>
         <br>
-        <small style="color: #666;">(${accuracy}%)</small>
+        <small class="${accuracyClass}">(${accuracy}%)</small>
       </td>
-      <td>
+      <td style="text-align: center;">
         <span class="status-indicator ${isAccurate ? 'status-completed' : 'status-warning'}">
-          ${isAccurate ? '✅ Đạt' : '⚠️ Lệch'}
+          <i class="fas fa-${isAccurate ? 'check-circle' : 'exclamation-triangle'}"></i>
+          ${isAccurate ? 'Đạt' : 'Lệch'}
         </span>
       </td>
     `;
     
-    // Highlight batch entries
+    // Highlight batch entries with CSS classes
     if (isBatch) {
-      row.style.backgroundColor = '#f0f8ff';
-      row.style.borderLeft = '4px solid #007bff';
+      row.classList.add('batch-history-row');
       row.title = `Danh sách đơn hàng - Click để xem chi tiết`;
-      row.style.cursor = 'pointer';
       row.onclick = () => showBatchHistoryDetails(entry);
     }
     
@@ -1214,7 +1865,7 @@ function showBatchHistoryDetails(batchEntry) {
 function clearHistory() {
   if (confirm('Bạn có chắc chắn muốn xóa toàn bộ lịch sử?')) {
     countingHistory = [];
-    saveHistory();
+    saveHistory(); // Này sẽ gọi sendHistoryToESP32() với array rỗng
     updateHistoryTable();
     showNotification('Xóa lịch sử thành công', 'info');
   }
@@ -1390,9 +2041,9 @@ async function sendESP32Command(action, data = {}) {
     }
     
     const result = await response.text();
-    console.log(`✅ ESP32 Command ${action} sent successfully:`, result);
+    console.log(`ESP32 Command ${action} sent successfully:`, result);
     
-    // 🔄 Đợi 200ms để ESP32 xử lý command trước khi tiếp tục
+    // Đợi 200ms để ESP32 xử lý command trước khi tiếp tục
     if (action === 'next_order') {
       console.log('⏱️ Waiting for ESP32 to process next_order...');
       await new Promise(resolve => setTimeout(resolve, 200));
@@ -1401,7 +2052,7 @@ async function sendESP32Command(action, data = {}) {
     return result;
     
   } catch (error) {
-    console.error('❌ Error sending ESP32 command:', error);
+    console.error('Error sending ESP32 command:', error);
     showNotification('Lỗi gửi lệnh đến ESP32: ' + error.message, 'error');
     return null;
   }
@@ -1590,8 +2241,10 @@ async function getStatus() {
   }
 }
 
-function updateStatusFromDevice(data) {
+async function updateStatusFromDevice(data) {
   if (!data) return;
+  
+  console.log('🔄 updateStatusFromDevice called with:', data);
   
   // Update current count if device has new count
   if (data.count !== undefined) {
@@ -1603,27 +2256,69 @@ function updateStatusFromDevice(data) {
       if (currentOrderIndex >= 0) {
         const currentOrder = selectedOrders[currentOrderIndex];
         
-        // Cập nhật tổng số đếm cho toàn bộ batch
-        countingState.totalCounted = data.count;
+        // ESP32 gửi total count tích lũy cho toàn bộ batch
+        const totalCountFromDevice = data.count;
         
-        // Tính số đếm đã hoàn thành từ các đơn hàng trước đó
+        // Debug: Log thông tin đơn hàng hiện tại
+        console.log(`🔍 DEBUG - Đơn ${currentOrderIndex + 1}:`, {
+          customerName: currentOrder.customerName,
+          quantity: currentOrder.quantity,
+          currentCount: currentOrder.currentCount,
+          status: currentOrder.status
+        });
+        
+        // Tính số đếm đã hoàn thành từ các đơn hàng trước đó (THEO THỨ TỰ)
         let completedCount = 0;
         for (let i = 0; i < currentOrderIndex; i++) {
-          completedCount += selectedOrders[i].quantity; // Lấy số lượng kế hoạch đã hoàn thành
+          // Đối với đơn đã completed, cộng đúng số quantity
+          if (selectedOrders[i].status === 'completed') {
+            completedCount += selectedOrders[i].quantity;
+            console.log(`🔍 DEBUG - Đơn ${i + 1} đã hoàn thành: ${selectedOrders[i].quantity} bao`);
+          }
         }
         
-        // Số đếm hiện tại của đơn hàng = tổng đếm - đã hoàn thành
-        currentOrder.currentCount = Math.max(0, data.count - completedCount);
+        // Số đếm hiện tại của đơn hàng = total từ ESP32 - đã hoàn thành trước đó
+        const calculatedCurrentCount = Math.max(0, totalCountFromDevice - completedCount);
         
-        console.log(`📊 Đơn ${currentOrderIndex + 1}/${selectedOrders.length}: Tổng=${data.count}, Đã xong=${completedCount}, Hiện tại=${currentOrder.currentCount}/${currentOrder.quantity}`);
+        // ĐẢM BẢO không vượt quá target của đơn hiện tại
+        const newCurrentCount = Math.min(calculatedCurrentCount, currentOrder.quantity);
+        
+        // CHỈ cập nhật nếu số mới lớn hơn (tránh ghi đè sai)
+        if (newCurrentCount >= (currentOrder.currentCount || 0)) {
+          currentOrder.currentCount = newCurrentCount;
+        }
+        
+        console.log(`🔍 DEBUG - Tính toán chi tiết:`, {
+          currentOrderIndex: currentOrderIndex,
+          totalFromESP32: totalCountFromDevice,
+          completedCountFromPreviousOrders: completedCount,
+          calculatedCurrentCount: calculatedCurrentCount,
+          currentOrder_oldCurrentCount: currentOrder.currentCount || 0,
+          currentOrder_newCurrentCount: newCurrentCount,
+          currentOrder_targetQuantity: currentOrder.quantity,
+          willUpdate: newCurrentCount >= (currentOrder.currentCount || 0)
+        });
+        
+        // Cập nhật tổng đếm
+        countingState.totalCounted = totalCountFromDevice;
+        
+        console.log(`Đơn ${currentOrderIndex + 1}/${selectedOrders.length}: ${currentOrder.customerName}`);
+        console.log(`ESP32 total: ${totalCountFromDevice} | Đã xong: ${completedCount} | Đơn hiện tại: ${currentOrder.currentCount}/${currentOrder.quantity}`);
+        console.log(`Tổng batch: ${countingState.totalCounted}/${countingState.totalPlanned}`);
         
         // Kiểm tra xem đơn hàng hiện tại đã hoàn thành chưa
         if (currentOrder.currentCount >= currentOrder.quantity) {
           currentOrder.currentCount = currentOrder.quantity; // Đảm bảo không vượt quá
           currentOrder.status = 'completed';
           
-          console.log(`✅ Hoàn thành đơn ${currentOrderIndex + 1}: ${currentOrder.customerName} - ${currentOrder.product.name}`);
-          console.log(`📊 Final count: ${currentOrder.currentCount}/${currentOrder.quantity}`);
+          console.log(`HOÀN THÀNH ĐƠN ${currentOrderIndex + 1}: ${currentOrder.customerName} - ${currentOrder.product.name}`);
+          console.log(`Order completion details:`, {
+            orderIndex: currentOrderIndex,
+            customerName: currentOrder.customerName,
+            quantity: currentOrder.quantity,
+            currentCount: currentOrder.currentCount,
+            status: currentOrder.status
+          });
           
           // Lưu đơn hàng vào lịch sử đơn lẻ
           const historyEntry = {
@@ -1636,34 +2331,112 @@ function updateStatusFromDevice(data) {
             actualCount: currentOrder.currentCount
           };
           
+          console.log('ĐANG LƯU VÀO LỊCH SỬ:', historyEntry);
+          console.log('countingHistory trước khi thêm:', countingHistory.length);
+          
           countingHistory.push(historyEntry);
           saveHistory();
           
+          console.log('countingHistory sau khi thêm:', countingHistory.length);
+          console.log('localStorage countingHistory:', localStorage.getItem('countingHistory') ? 'EXISTS' : 'NULL');
+          console.log('Parsed từ localStorage:', JSON.parse(localStorage.getItem('countingHistory') || '[]').length);
+          
+          // CẬP NHẬT BẢNG LỊCH SỬ NGAY LẬP TỨC
+          updateHistoryTable();
+          console.log('ĐÃ CẬP NHẬT BẢNG LỊCH SỬ');
+          
+          // HIỂN THỊ THÔNG BÁO VỀ LỊCH SỬ
+          setTimeout(() => {
+            const historyTab = document.querySelector('[data-tab="history"]') || document.querySelector('[onclick="showTab(\'history\')"]');
+            if (historyTab) {
+              console.log('Có thể chuyển sang tab Lịch sử để xem kết quả');
+              showNotification(`Đã lưu lịch sử đơn ${currentOrder.customerName}. Xem tại tab "Lịch sử đếm"`, 'success');
+            }
+          }, 500);
+          
           // KIỂM TRA XEM CÒN ĐƠN HÀNG TIẾP THEO KHÔNG
           if (currentOrderIndex < selectedOrders.length - 1) {
-            // VẪN CÒN ĐƠN HÀNG TIẾP THEO - CHUYỂN ĐƠN
-            console.log(`➡️ Còn ${selectedOrders.length - currentOrderIndex - 1} đơn hàng nữa`);
-            setTimeout(async () => {
-              console.log('🔄 Calling moveToNextOrder from updateStatusFromDevice');
-              await moveToNextOrder();
+            // VẪN CÒN ĐƠN HÀNG TIẾP THEO 
+            console.log(`VẪN CÒN ${selectedOrders.length - currentOrderIndex - 1} ĐƠN HÀNG NỮA`);
+            console.log(`Current order index: ${currentOrderIndex}, total orders: ${selectedOrders.length}`);
+            
+            // Chuyển đơn tiếp theo sang trạng thái counting
+            const nextOrder = selectedOrders[currentOrderIndex + 1];
+            console.log(`Next order details:`, {
+              index: currentOrderIndex + 1,
+              customerName: nextOrder.customerName,
+              productName: nextOrder.product.name,
+              quantity: nextOrder.quantity,
+              currentStatus: nextOrder.status
+            });
+            
+            nextOrder.status = 'counting';
+            countingState.currentOrderIndex = currentOrderIndex + 1;
+            
+            console.log(`CHUYỂN SANG ĐƠN ${countingState.currentOrderIndex + 1}/${selectedOrders.length}: ${nextOrder.customerName}`);
+            
+            // ❗ QUAN TRỌNG: Cập nhật target mới cho ESP32 để nó tiếp tục đếm
+            // ESP32 hiện tại có isLimitReached=true, cần reset để tiếp tục
+            const newTotalTarget = selectedOrders.reduce((sum, order) => sum + order.quantity, 0);
+            
+            console.log(`TARGET CALCULATION:`, {
+              selectedOrders: selectedOrders.map(o => `${o.customerName}: ${o.quantity}`),
+              newTotalTarget: newTotalTarget,
+              mqttConnected: mqttConnected
+            });
+            
+            try {
+              console.log(`GỬI LỆNH CẬP NHẬT TARGET CHO ESP32: ${newTotalTarget}`);
               
-              // 🔄 FORCE REFRESH UI SAU KHI CHUYỂN ĐƠN
-              setTimeout(() => {
-                console.log('🔄 Force refreshing UI after moveToNextOrder from updateStatusFromDevice');
-                updateOrderTable();
-                updateOverview();
-              }, 200);
-            }, 500);
+              if (mqttConnected) {
+                console.log(`Sending MQTT command to bagcounter/config/update`);
+                // Gửi lệnh update target qua MQTT
+                const result = sendMQTTCommand('bagcounter/config/update', {
+                  target: newTotalTarget,
+                  resetLimit: true,
+                  nextOrder: {
+                    customerName: nextOrder.customerName,
+                    productName: nextOrder.product.name,
+                    quantity: nextOrder.quantity,
+                    orderCode: nextOrder.orderCode
+                  }
+                });
+                console.log(`MQTT command result:`, result);
+              } else {
+                console.log(`Sending API command`);
+                // Gửi qua API
+                await sendESP32Command('update_target', { 
+                  target: newTotalTarget,
+                  resetLimit: true 
+                });
+              }
+              
+              console.log('ĐÃ GỬI LỆNH CẬP NHẬT TARGET CHO ESP32');
+              
+            } catch (error) {
+              console.error('LỖI CẬP NHẬT TARGET:', error);
+            }
+            
+            showNotification(`Chuyển sang đơn ${countingState.currentOrderIndex + 1}: ${nextOrder.customerName}`, 'info');
+            
           } else {
-            // ĐÂY MỚI LÀ HOÀN THÀNH TẤT CẢ
-            console.log(`🎉 HOÀN THÀNH TẤT CẢ ${selectedOrders.length} ĐƠN HÀNG!`);
+            // ĐÂY LÀ HOÀN THÀNH TẤT CẢ
+            console.log(`HOÀN THÀNH TẤT CẢ ${selectedOrders.length} ĐƠN HÀNG!`);
             countingState.isActive = false;
-            sendESP32Command('stop');
             
-            // LƯU TOÀN BỘ BATCH VÀO LỊCH SỬ ĐẾM CHÍNH
-            saveBatchToCountingHistory(activeBatch, selectedOrders);
+            // Gửi lệnh pause đến ESP32 để dừng đếm
+            try {
+              if (mqttConnected) {
+                pauseCountingMQTT();
+              } else {
+                await sendESP32Command('pause');
+              }
+              console.log('ESP32 đã được lệnh dừng');
+            } catch (error) {
+              console.error('Lỗi gửi lệnh pause:', error);
+            }
             
-            showNotification(`🎉 Hoàn thành tất cả ${selectedOrders.length} đơn hàng được chọn!`, 'success');
+            showNotification(`Hoàn thành tất cả ${selectedOrders.length} đơn hàng!`, 'success');
           }
         }
         
@@ -1717,7 +2490,7 @@ async function moveToNextOrder() {
       
     } else {
       // HẾT ĐƠN HÀNG - HOÀN THÀNH TẤT CẢ
-      console.log('🎉 Hoàn thành tất cả đơn hàng!');
+      console.log('Hoàn thành tất cả đơn hàng!');
       countingState.isActive = false;
       sendESP32Command('stop');
       
@@ -1732,9 +2505,9 @@ async function moveToNextOrder() {
   updateOrderTable();
   updateOverview();
   
-  // 🔄 Force refresh UI to ensure order transition is visible
+  // Force refresh UI to ensure order transition is visible
   setTimeout(() => {
-    console.log('🔄 Force refreshing UI after order transition');
+    console.log('force refreshing UI after order transition');
     updateOrderTable();
     updateOverview();
   }, 100);
@@ -1772,8 +2545,8 @@ function saveBatchToCountingHistory(batch, completedOrders) {
   countingHistory.push(batchEntry);
   saveHistory();
   
-  console.log('✅ Đã lưu batch vào lịch sử đếm:', batch.name);
-  console.log('📊 Tổng kế hoạch:', batchEntry.plannedQuantity, '- Tổng thực hiện:', batchEntry.actualCount);
+  console.log('Đã lưu batch vào lịch sử đếm:', batch.name);
+  console.log('Tổng kế hoạch:', batchEntry.plannedQuantity, '- Tổng thực hiện:', batchEntry.actualCount);
   
   // Cập nhật bảng lịch sử
   updateHistoryTable();
@@ -1820,28 +2593,28 @@ async function checkESP32Data() {
     const statusResponse = await fetch('/api/status');
     if (statusResponse.ok) {
       const statusData = await statusResponse.json();
-      console.log('📊 ESP32 Status:', statusData);
+      console.log('ESP32 Status:', statusData);
     }
     
     // Check orders
     const ordersResponse = await fetch('/api/orders');
     if (ordersResponse.ok) {
       const ordersData = await ordersResponse.json();
-      console.log('📋 ESP32 Orders (' + ordersData.length + '):', ordersData);
+      console.log('ESP32 Orders (' + ordersData.length + '):', ordersData);
     }
     
     // Check products
     const productsResponse = await fetch('/api/products');
     if (productsResponse.ok) {
       const productsData = await productsResponse.json();
-      console.log('📦 ESP32 Products (' + productsData.length + '):', productsData);
+      console.log('ESP32 Products (' + productsData.length + '):', productsData);
     }
     
     // Check settings
     const settingsResponse = await fetch('/api/settings');
     if (settingsResponse.ok) {
       const settingsData = await settingsResponse.json();
-      console.log('⚙️ ESP32 Settings:', settingsData);
+      console.log('ESP32 Settings:', settingsData);
     }
     
     console.log('=== END ESP32 DATA CHECK ===');
@@ -1945,6 +2718,11 @@ function debugBatches() {
 // Make debug function available globally
 window.debugBatches = debugBatches;
 
+// Make control functions available globally  
+window.startCounting = startCounting;
+window.pauseCounting = pauseCounting;
+window.resetCounting = resetCounting;
+
 // Tab Management
 function showTab(tabName) {
   // Hide all tab panes
@@ -1977,7 +2755,7 @@ function showTab(tabName) {
       updateOverview();
       break;
     case 'history':
-      updateHistoryDisplay();
+      updateHistoryTable();
       break;
     case 'order':
       updateProductSelect();
@@ -2164,7 +2942,7 @@ function filterHistory() {
   const dateTo = document.getElementById('dateTo').value;
   
   if (!dateFrom || !dateTo) {
-    updateHistoryDisplay();
+    updateHistoryTable();
     return;
   }
   
@@ -2173,28 +2951,68 @@ function filterHistory() {
     return itemDate >= dateFrom && itemDate <= dateTo;
   });
   
-  // Display filtered results
-  const historyList = document.getElementById('historyList');
-  if (!historyList) return;
+  // Update history table with filtered data
+  updateHistoryTableWithData(filteredHistory);
+}
+
+function updateHistoryTableWithData(historyData) {
+  const tbody = document.getElementById('historyTableBody');
+  if (!tbody) return;
   
-  historyList.innerHTML = '';
+  tbody.innerHTML = '';
   
-  if (filteredHistory.length === 0) {
-    historyList.innerHTML = '<p class="text-center">Không tìm thấy dữ liệu trong khoảng thời gian này</p>';
+  if (historyData.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="7" class="text-center">Không tìm thấy dữ liệu trong khoảng thời gian này</td></tr>';
     return;
   }
   
-  filteredHistory.reverse().forEach(item => {
-    const historyItem = document.createElement('div');
-    historyItem.className = 'history-item';
-    historyItem.innerHTML = `
-      <h5>${item.orderCode} - ${item.productName}</h5>
-      <p><i class="fas fa-user"></i> Khách hàng: ${item.customerName}</p>
-      <p><i class="fas fa-truck"></i> Xe: ${item.vehicleNumber}</p>
-      <p><i class="fas fa-calculator"></i> Số lượng: ${item.count}/${item.target}</p>
-      <p><i class="fas fa-clock"></i> Thời gian: ${new Date(item.timestamp).toLocaleString('vi-VN')}</p>
+  // Sắp xếp theo thời gian mới nhất
+  const sortedHistory = [...historyData].sort((a, b) => 
+    new Date(b.timestamp) - new Date(a.timestamp)
+  );
+  
+  sortedHistory.forEach((entry, index) => {
+    const row = document.createElement('tr');
+    const isAccurate = entry.actualCount === entry.plannedQuantity;
+    const accuracy = entry.plannedQuantity > 0 ? 
+      ((entry.actualCount / entry.plannedQuantity) * 100).toFixed(1) : 0;
+    
+    // Kiểm tra xem có phải là batch không
+    const isBatch = entry.isBatch || entry.customerName.includes('📦');
+    
+    row.innerHTML = `
+      <td>${new Date(entry.timestamp).toLocaleString('vi-VN')}</td>
+      <td>
+        <strong>${entry.customerName}</strong>
+        ${entry.orderCode ? `<br><small style="color: #666;">Mã: ${entry.orderCode}</small>` : ''}
+      </td>
+      <td>${entry.vehicleNumber || 'N/A'}</td>
+      <td>${entry.productName}</td>
+      <td><strong>${entry.plannedQuantity}</strong></td>
+      <td>
+        <span style="color: ${isAccurate ? 'green' : 'red'}; font-weight: bold;">
+          ${entry.actualCount}
+        </span>
+        <br>
+        <small style="color: #666;">(${accuracy}%)</small>
+      </td>
+      <td>
+        <span class="status-indicator ${isAccurate ? 'status-completed' : 'status-warning'}">
+          ${isAccurate ? '✅ Đạt' : '⚠️ Lệch'}
+        </span>
+      </td>
     `;
-    historyList.appendChild(historyItem);
+    
+    // Highlight batch entries
+    if (isBatch) {
+      row.style.backgroundColor = '#f0f8ff';
+      row.style.borderLeft = '4px solid #007bff';
+      row.title = `Danh sách đơn hàng - Click để xem chi tiết`;
+      row.style.cursor = 'pointer';
+      row.onclick = () => showBatchHistoryDetails(entry);
+    }
+    
+    tbody.appendChild(row);
   });
 }
 
@@ -2204,11 +3022,21 @@ function exportHistory() {
     return;
   }
   
-  let csvContent = "data:text/csv;charset=utf-8,";
-  csvContent += "Mã đơn hàng,Khách hàng,Sản phẩm,Xe,Số lượng,Mục tiêu,Thời gian\n";
+  // Sử dụng BOM để fix encoding UTF-8
+  let csvContent = "data:text/csv;charset=utf-8,\uFEFF";
+  csvContent += "Mã đơn hàng,Khách hàng,Sản phẩm,Xe,Số lượng thực tế,Số lượng kế hoạch,Thời gian\n";
   
   countingHistory.forEach(item => {
-    csvContent += `${item.orderCode},${item.customerName},${item.productName},${item.vehicleNumber},${item.count},${item.target},${new Date(item.timestamp).toLocaleString('vi-VN')}\n`;
+    // Sử dụng đúng property names và xử lý undefined
+    const orderCode = item.orderCode || 'N/A';
+    const customerName = item.customerName || 'N/A';
+    const productName = item.productName || 'N/A';
+    const vehicleNumber = item.vehicleNumber || 'N/A';
+    const actualCount = item.actualCount || 0;
+    const plannedQuantity = item.plannedQuantity || 0;
+    const timestamp = new Date(item.timestamp).toLocaleString('vi-VN');
+    
+    csvContent += `"${orderCode}","${customerName}","${productName}","${vehicleNumber}",${actualCount},${plannedQuantity},"${timestamp}"\n`;
   });
   
   const encodedUri = encodeURI(csvContent);
@@ -2226,7 +3054,7 @@ function clearHistory() {
   if (confirm('Bạn có chắc chắn muốn xóa toàn bộ lịch sử đếm?')) {
     countingHistory = [];
     saveHistory();
-    updateHistoryDisplay();
+    updateHistoryTable();
     showNotification('Xóa lịch sử thành công', 'success');
   }
 }
@@ -2371,106 +3199,53 @@ function restartESP32() {
   });
 }
 
+// Legacy API polling (kept as fallback only)  
 function startStatusPolling() {
-  console.log('Starting status polling...');
+  console.log('Using legacy API polling - MQTT failed');
   
   let lastStatus = '';
   let lastCount = 0;
+  let lastIRTimestamp = 0;
   
+  // Reduced frequency polling as fallback
   setInterval(async () => {
     try {
       const response = await fetch('/api/status');
       if (response.ok) {
         const data = await response.json();
         
-        const activeBatch = orderBatches.find(b => b.isActive);
-        if (!activeBatch) {
-          // KHÔNG CÓ BATCH ACTIVE - CHỈ HIỂN thị TRẠNG THÁI
-          updateDisplayOnly(data);
-          lastStatus = data.status || '';
-          lastCount = data.count || 0;
-          return;
-        }
-        
-        const selectedOrders = activeBatch.orders.filter(o => o.selected);
-        if (selectedOrders.length === 0) {
-          updateDisplayOnly(data);
-          lastStatus = data.status || '';
-          lastCount = data.count || 0;
-          return;
-        }
-        
-        // KIỂM TRA LỆNH IR REMOTE
-        const statusChanged = lastStatus !== (data.status || '');
-        
-        if (statusChanged && data.status) {
-          console.log('🎮 IR Remote command detected:', lastStatus, '→', data.status);
+        // Handle IR commands
+        if (data.hasNewIRCommand && data.lastIRTimestamp !== lastIRTimestamp) {
+          console.log('IR Command detected from ESP32:', data.lastIRCommand, 'at', data.lastIRTimestamp);
+          lastIRTimestamp = data.lastIRTimestamp;
           
-          if (data.status === 'RUNNING' && !countingState.isActive) {
-            // IR REMOTE START - GOI HAM startCounting() GIONG WEB
-            console.log('IR Remote START detected - calling startCounting()');
-            startCounting(); // Goi dung ham nhu web
-            
-          } else if (data.status === 'RUNNING' && countingState.isActive) {
-            // 🔄 ESP32 TRẢ VỀ RUNNING - CÓ THỂ LÀ SAU KHI CHUYỂN ĐƠN
-            console.log('🔄 ESP32 confirms RUNNING status - ensuring current order is counting');
-            
-            // Đảm bảo đơn hàng hiện tại đang ở trạng thái counting
-            if (countingState.currentOrderIndex < selectedOrders.length) {
-              const currentOrder = selectedOrders[countingState.currentOrderIndex];
-              if (currentOrder.status !== 'counting' && currentOrder.status !== 'completed') {
-                console.log(`🔄 Fixing order ${countingState.currentOrderIndex + 1} status: ${currentOrder.status} → counting`);
-                currentOrder.status = 'counting';
-                
-                // ✅ CẬP NHẬT UI NGAY LẬP TỨC
-                saveOrderBatches();
-                updateOrderTable();
-                updateOverview();
-                
-                // 🔄 Force refresh UI
-                setTimeout(() => {
-                  console.log('🔄 Force refreshing UI after status fix');
-                  updateOrderTable();
-                  updateOverview();
-                }, 100);
-              }
-            }
-            
-          } else if (data.status === 'PAUSE') {
-            // IR REMOTE PAUSE - GOI HAM pauseCounting() GIONG WEB
-            console.log('IR Remote PAUSE detected - calling pauseCounting()');
-            pauseCounting(); // Goi dung ham nhu web
-            
-          } else if (data.status === 'RESET') {
-            // IR REMOTE RESET - GOI HAM resetCounting() GIONG WEB
-            console.log('IR Remote RESET detected - calling resetCounting()');
-            resetCounting(); // Goi dung ham nhu web
+          if (data.lastIRCommand === 'START') {
+            console.log('IR Remote START - calling startCounting()');
+            startCounting();
+          } else if (data.lastIRCommand === 'PAUSE') {
+            console.log('IR Remote PAUSE - calling pauseCounting()');
+            pauseCounting();
+          } else if (data.lastIRCommand === 'RESET') {
+            console.log('IR Remote RESET - calling resetCounting()');
+            resetCounting();
           }
+          return;
         }
         
-        // 📊 Cập nhật số đếm (chỉ khi có thay đổi)
+        // Handle count updates
         if (data.count !== undefined && data.count !== lastCount) {
-          console.log('📊 Count update from ESP32:', lastCount, '→', data.count);
-          console.log('📊 Current counting state:', {
-            isActive: countingState.isActive,
-            currentOrderIndex: countingState.currentOrderIndex,
-            totalCounted: countingState.totalCounted,
-            totalPlanned: countingState.totalPlanned,
-            selectedOrdersCount: selectedOrders.length
-          });
+          console.log('Count update from ESP32:', lastCount, '→', data.count);
           updateStatusFromDevice(data);
           lastCount = data.count;
         }
         
         lastStatus = data.status || '';
-        
-        // Cập nhật display
         updateDisplayElements(data);
       }
     } catch (error) {
       console.error('Error polling status:', error);
     }
-  }, 1000);
+  }, 3000); // 3 seconds instead of 1 second for fallback mode
 }
 
 // Hàm cập nhật chỉ hiển thị khi không có batch hoặc không có orders được chọn
@@ -3216,3 +3991,4 @@ function clearBatchHistory() {
     location.reload(); // Refresh page để đóng modal
   }
 }
+
