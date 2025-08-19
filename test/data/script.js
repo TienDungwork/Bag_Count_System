@@ -32,7 +32,7 @@ let settings = {
   ipAddress: '192.168.1.200',
   gateway: '192.168.1.1',
   subnet: '255.255.255.0',
-  sensorDelay: 50,
+  sensorDelay: 20,
   bagDetectionDelay: 200,
   minBagInterval: 100,
   autoReset: false,
@@ -2570,9 +2570,10 @@ function saveGeneralSettings() {
   settings.autoReset = document.getElementById('autoReset').checked;
   settings.brightness = parseInt(document.getElementById('brightness').value);
   
-  console.log('Saving settings:', settings);
+  console.log('💾 Saving settings to ESP32:', settings);
   
-  saveSettings();
+  // Lưu vào localStorage
+  localStorage.setItem('settings', JSON.stringify(settings));
   
   // CẬP NHẬT TÊN BĂNG TẢI NGAY LẬP TỨC
   const conveyorIdElement = document.getElementById('conveyorId');
@@ -2581,7 +2582,40 @@ function saveGeneralSettings() {
     console.log('Conveyor name display updated immediately to:', settings.conveyorName);
   }
   
+  // Gửi đến ESP32 qua API (ưu tiên)
+  sendSettingsToESP32();
+  
+  // Gửi qua MQTT để sync real-time (backup)
+  sendSettingsViaMQTT();
+  
   showNotification('Lưu cài đặt thành công', 'success');
+}
+
+// Gửi settings qua MQTT (real-time sync)
+function sendSettingsViaMQTT() {
+  if (mqttConnected && mqttClient) {
+    try {
+      const mqttSettings = {
+        conveyorName: settings.conveyorName,
+        brightness: settings.brightness,
+        sensorDelay: settings.sensorDelay,
+        bagDetectionDelay: settings.bagDetectionDelay,
+        minBagInterval: settings.minBagInterval,
+        autoReset: settings.autoReset
+      };
+      
+      const message = JSON.stringify(mqttSettings);
+      console.log('📡 Sending settings via MQTT:', message);
+      
+      mqttClient.publish('bagcounter/config/update', message);
+      console.log('✅ Settings sent via MQTT');
+      
+    } catch (error) {
+      console.error('❌ Error sending settings via MQTT:', error);
+    }
+  } else {
+    console.log('⚠️ MQTT not connected, skipping MQTT settings sync');
+  }
 }
 
 // Kiểm tra dữ liệu ESP32
@@ -3139,14 +3173,14 @@ function sendRemoteCommand(command) {
 }
 
 function sendSettingsToESP32() {
-  // Send network settings and other configurations to ESP32
+  // 🔄 GỬI SETTINGS TỚI ESP32 ĐỂ GHI ĐÈ CÁC GIÁ TRỊ MẶC ĐỊNH
   const data = {
     conveyorName: settings.conveyorName,
     brightness: settings.brightness,
     sensorDelay: settings.sensorDelay,
-    bagDetectionDelay: settings.bagDetectionDelay,
-    minBagInterval: settings.minBagInterval,
-    autoReset: settings.autoReset,
+    bagDetectionDelay: settings.bagDetectionDelay,   // ⚡ GHI ĐÈ default 200ms
+    minBagInterval: settings.minBagInterval,         // ⚡ GHI ĐÈ default 100ms
+    autoReset: settings.autoReset,                   // ⚡ GHI ĐÈ default false
     // Network settings
     ipAddress: settings.ipAddress,
     gateway: settings.gateway,
@@ -3154,6 +3188,8 @@ function sendSettingsToESP32() {
     dns1: "8.8.8.8",
     dns2: "8.8.4.4"
   };
+  
+  console.log('📡 Sending settings to ESP32 (will override defaults):', data);
   
   fetch('/api/settings', {
     method: 'POST',
@@ -3164,7 +3200,7 @@ function sendSettingsToESP32() {
   })
   .then(response => response.json())
   .then(result => {
-    console.log('Settings sent to ESP32:', result);
+    console.log('✅ Settings sent to ESP32 and saved to /settings.json:', result);
     if (result.needRestart) {
       // Hiển thị thông báo cần restart
       if (confirm('IP Address đã thay đổi. Cần khởi động lại ESP32 để áp dụng. Khởi động lại ngay?')) {
@@ -3173,11 +3209,11 @@ function sendSettingsToESP32() {
         showNotification('Lưu ý: Cần khởi động lại ESP32 để áp dụng IP mới', 'warning');
       }
     } else {
-      showNotification('Cài đặt đã được áp dụng', 'success');
+      showNotification('Cài đặt đã được áp dụng trên ESP32', 'success');
     }
   })
   .catch(error => {
-    console.error('Error sending settings:', error);
+    console.error('❌ Error sending settings to ESP32:', error);
     showNotification('Lỗi gửi cài đặt đến ESP32', 'error');
   });
 }
@@ -3454,8 +3490,17 @@ function scanWiFiNetworks() {
   }
   
   fetch('/api/wifi/scan')
-    .then(response => response.json())
+    .then(response => {
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+      }
+      return response.json();
+    })
     .then(data => {
+      if (data.error) {
+        throw new Error(data.error);
+      }
+      
       if (networksContainer) {
         networksContainer.innerHTML = '';
         
@@ -3464,16 +3509,19 @@ function scanWiFiNetworks() {
             const networkItem = createWiFiNetworkItem(network);
             networksContainer.appendChild(networkItem);
           });
+          showNotification(`Tìm thấy ${data.networks.length} mạng WiFi`, 'success');
         } else {
           networksContainer.innerHTML = '<p style="text-align: center; color: #6c757d;">Không tìm thấy mạng WiFi nào</p>';
+          showNotification('Không tìm thấy mạng WiFi nào', 'warning');
         }
       }
     })
     .catch(error => {
       console.error('Error scanning WiFi:', error);
-      showNotification('Lỗi khi quét WiFi', 'error');
+      const errorMessage = error.message || 'Lỗi không xác định khi quét WiFi';
+      showNotification(`Lỗi quét WiFi: ${errorMessage}`, 'error');
       if (networksContainer) {
-        networksContainer.innerHTML = '<p style="text-align: center; color: #dc3545;">Lỗi khi quét mạng WiFi</p>';
+        networksContainer.innerHTML = `<p style="text-align: center; color: #dc3545;">❌ ${errorMessage}</p>`;
       }
     })
     .finally(() => {

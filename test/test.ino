@@ -3,7 +3,7 @@
 #include "soc/soc.h"
 #include "soc/rtc_cntl_reg.h"
 #include <ESP32-HUB75-MatrixPanel-I2S-DMA.h>
-#include <WebServer_ESP32_SC_W5500.h>
+#include <WebServer_ESP32_W5500.h>
 
 // Force use ESP32 WiFi library
 #ifdef ARDUINO_ARCH_ESP32
@@ -16,7 +16,7 @@
 #include <time.h>
 #include <vector>
 #include <FS.h>
-#include <IRremote.h>
+  #include <IRremote.h> 1Q
 
 //----------------------------------------W5500 Ethernet config
 // W5500 SPI pin definitions
@@ -91,20 +91,22 @@ WiFiClient ethClient;
 PubSubClient mqtt(ethClient);
 
 //----------------------------------------Defines the connected PIN between P5 and ESP32.
-#define R1_PIN 10
-#define G1_PIN 46
-#define B1_PIN 3
-#define R2_PIN 18
-#define G2_PIN 17
-#define B2_PIN 16
-#define A_PIN 14
-#define B_PIN 13
-#define C_PIN 12
-#define D_PIN 11
-#define E_PIN -1  //--> required for 1/32 scan panels, like 64x64px. Any available pin would do, i.e. IO32.
-#define LAT_PIN 7
-#define OE_PIN 21
-#define CLK_PIN 15
+#define R1_PIN 19 
+#define G1_PIN 13
+#define B1_PIN 18
+#define R2_PIN 5
+#define G2_PIN 12
+#define B2_PIN 17
+
+#define A_PIN 16
+#define B_PIN 14
+#define C_PIN 4
+#define D_PIN 27
+#define E_PIN -1  //--> required for 1/32 scan panels, like 64x64px. Any available pin would do, i.e. IO32
+
+#define LAT_PIN 26
+#define OE_PIN 15
+#define CLK_PIN 2
 
 //----------------------------------------Sensor pin
 #define SENSOR_PIN 4 // Chân kết nối cảm biến t61
@@ -114,6 +116,21 @@ PubSubClient mqtt(ethClient);
 
 //----------------------------------------IR Remote pin
 #define RECV_PIN 1  // Chân nhận tín hiệu IR
+
+//----------------------------------------Settings variables (WEB SYNC - DEFAULT VALUES)
+// ⚠️ ĐÂY LÀ GIÁ TRỊ MẶC ĐỊNH - SẼ ĐƯỢC GHI ĐÈ KHI WEB GỬI CÀI ĐẶT MỚI
+int bagDetectionDelay = 200;        // Thời gian xác nhận 1 bao (ms) - DEFAULT, sẽ sync từ web
+int minBagInterval = 100;           // Khoảng cách tối thiểu giữa 2 bao (ms) - DEFAULT, sẽ sync từ web
+bool autoReset = false;             // Tự động reset sau khi hoàn thành - DEFAULT, sẽ sync từ web
+String conveyorName = "BT-001";     // Tên băng tải - DEFAULT, sẽ sync từ web
+int displayBrightness = 35;         // Độ sáng LED matrix (10-100%) - DEFAULT, sẽ sync từ web
+int sensorDelayMs = 50;             // Độ trễ cảm biến (ms) - DEFAULT, sẽ sync từ web
+
+// Timing variables for bag detection
+unsigned long lastBagTime = 0;      // Thời gian bao cuối cùng được phát hiện
+unsigned long bagStartTime = 0;     // Thời gian bắt đầu phát hiện bao hiện tại
+bool isBagDetected = false;         // Đang trong quá trình phát hiện bao
+bool waitingForInterval = false;    // Đang chờ khoảng cách tối thiểu
 
 //----------------------------------------
 #define PANEL_RES_X 64
@@ -149,9 +166,9 @@ String startTimeStr = ""; // Thời gian bắt đầu thực tế
 bool timeWaitingForSync = false; // Biến theo dõi trạng thái chờ đồng bộ thời gian
 String currentSystemStatus = "RESET"; // Trạng thái hệ thống: RUNNING, PAUSE, RESET (chỉ 3 trạng thái)
 
-// Biến để xử lý debounce cho cảm biến
+// Biến để xử lý debounce cho cảm biến  
 unsigned long lastDebounceTime = 0;
-unsigned long debounceDelay = 50;  // Thời gian debounce 50ms
+unsigned long debounceDelay = 50;  // Sẽ được sync từ sensorDelayMs
 int lastSensorState = HIGH;
 int sensorState;
 int lastTriggerState = HIGH;
@@ -484,6 +501,8 @@ void loadBagConfigsFromFile() {
 
 //------------------- Lưu/đọc cài đặt chung -------------------
 void loadSettingsFromFile() {
+  Serial.println("🔧 Loading settings from file to override defaults...");
+  
   if (LittleFS.exists("/settings.json")) {
     File file = LittleFS.open("/settings.json", "r");
     if (file) {
@@ -492,6 +511,8 @@ void loadSettingsFromFile() {
       
       DynamicJsonDocument doc(1024);
       if (deserializeJson(doc, content) == DeserializationError::Ok) {
+        Serial.println("📄 Found settings file, applying overrides:");
+        
         // Load Ethernet IP config
         String ethIP = doc["ipAddress"];
         String ethGateway = doc["gateway"];
@@ -507,21 +528,61 @@ void loadSettingsFromFile() {
           if (newDNS1.fromString(ethDNS1)) primaryDNS = newDNS1;
           if (newDNS2.fromString(ethDNS2)) secondaryDNS = newDNS2;
           
-          Serial.println("Loaded Ethernet config from file:");
-          Serial.println("IP: " + ethIP);
-          Serial.println("Gateway: " + ethGateway);
-          Serial.println("Subnet: " + ethSubnet);
+          Serial.println("  🌐 Ethernet config overridden:");
+          Serial.println("    IP: " + ethIP);
+          Serial.println("    Gateway: " + ethGateway);
+          Serial.println("    Subnet: " + ethSubnet);
         }
         
-        // Load other settings
+        // Load settings và ghi đè giá trị default
+        if (doc.containsKey("conveyorName")) {
+          String oldValue = conveyorName;
+          conveyorName = doc["conveyorName"].as<String>();
+          Serial.println("  ⚡ conveyorName: '" + oldValue + "' → '" + conveyorName + "'");
+        }
+        
         if (doc.containsKey("brightness")) {
-          int brightness = doc["brightness"];
-          if (brightness >= 10 && brightness <= 100) {
-            // Brightness sẽ được set sau khi display init
+          int oldValue = displayBrightness;
+          displayBrightness = doc["brightness"];
+          if (displayBrightness >= 10 && displayBrightness <= 100) {
+            Serial.println("  ⚡ brightness: " + String(oldValue) + "% → " + String(displayBrightness) + "%");
           }
         }
+        
+        if (doc.containsKey("sensorDelay")) {
+          int oldValue = sensorDelayMs;
+          sensorDelayMs = doc["sensorDelay"];
+          debounceDelay = sensorDelayMs; // Sync debounce delay
+          Serial.println("  ⚡ sensorDelay: " + String(oldValue) + "ms → " + String(sensorDelayMs) + "ms");
+        }
+        
+        if (doc.containsKey("bagDetectionDelay")) {
+          int oldValue = bagDetectionDelay;
+          bagDetectionDelay = doc["bagDetectionDelay"];
+          Serial.println("  ⚡ bagDetectionDelay: " + String(oldValue) + "ms → " + String(bagDetectionDelay) + "ms");
+        }
+        
+        if (doc.containsKey("minBagInterval")) {
+          int oldValue = minBagInterval;
+          minBagInterval = doc["minBagInterval"];
+          Serial.println("  ⚡ minBagInterval: " + String(oldValue) + "ms → " + String(minBagInterval) + "ms");
+        }
+        
+        if (doc.containsKey("autoReset")) {
+          bool oldValue = autoReset;
+          autoReset = doc["autoReset"];
+          Serial.println("  ⚡ autoReset: " + String(oldValue ? "true" : "false") + " → " + String(autoReset ? "true" : "false"));
+        }
+        
+        Serial.println("✅ All web settings successfully applied, defaults overridden");
+      } else {
+        Serial.println("❌ Failed to parse settings JSON");
       }
+    } else {
+      Serial.println("❌ Failed to open settings file");
     }
+  } else {
+    Serial.println("ℹ️ No settings file found - using default values (will be saved when web sends settings)");
   }
 }
 
@@ -869,17 +930,70 @@ void onMqttMessage(char* topic, byte* payload, unsigned int length) {
     
   } else if (topicStr == TOPIC_CONFIG) {
     Serial.println("MQTT Command: CONFIG UPDATE");
-    // Parse JSON config update
+    // Parse JSON config update - ÁP DỤNG SETTINGS TỪNG BỘ PHẬN
     DynamicJsonDocument doc(512);
     if (deserializeJson(doc, message) == DeserializationError::Ok) {
+      bool settingsChanged = false;
+      
       if (doc.containsKey("brightness")) {
-        int brightness = doc["brightness"];
-        if (brightness >= 10 && brightness <= 100) {
-          dma_display->setBrightness8(map(brightness, 0, 100, 0, 255));
-          Serial.println("Brightness updated via MQTT: " + String(brightness));
+        displayBrightness = doc["brightness"];
+        if (displayBrightness >= 10 && displayBrightness <= 100) {
+          dma_display->setBrightness8(map(displayBrightness, 0, 100, 0, 255));
+          Serial.println("✅ MQTT: Applied brightness: " + String(displayBrightness) + "%");
+          settingsChanged = true;
         }
       }
       
+      if (doc.containsKey("sensorDelay")) {
+        sensorDelayMs = doc["sensorDelay"];
+        debounceDelay = sensorDelayMs;
+        Serial.println("✅ MQTT: Applied sensorDelay: " + String(sensorDelayMs) + "ms");
+        settingsChanged = true;
+      }
+      
+      if (doc.containsKey("bagDetectionDelay")) {
+        ::bagDetectionDelay = doc["bagDetectionDelay"];
+        Serial.println("✅ MQTT: Applied bagDetectionDelay: " + String(::bagDetectionDelay) + "ms");
+        settingsChanged = true;
+      }
+      
+      if (doc.containsKey("minBagInterval")) {
+        ::minBagInterval = doc["minBagInterval"];
+        Serial.println("✅ MQTT: Applied minBagInterval: " + String(::minBagInterval) + "ms");
+        settingsChanged = true;
+      }
+      
+      if (doc.containsKey("autoReset")) {
+        ::autoReset = doc["autoReset"];
+        Serial.println("✅ MQTT: Applied autoReset: " + String(::autoReset ? "true" : "false"));
+        settingsChanged = true;
+      }
+      
+      if (doc.containsKey("conveyorName")) {
+        conveyorName = doc["conveyorName"].as<String>();
+        Serial.println("✅ MQTT: Applied conveyorName: " + conveyorName);
+        settingsChanged = true;
+      }
+      
+      // Lưu settings vào file nếu có thay đổi
+      if (settingsChanged) {
+        DynamicJsonDocument settingsDoc(1024);
+        settingsDoc["conveyorName"] = conveyorName;
+        settingsDoc["brightness"] = displayBrightness;
+        settingsDoc["sensorDelay"] = sensorDelayMs;
+        settingsDoc["bagDetectionDelay"] = ::bagDetectionDelay;
+        settingsDoc["minBagInterval"] = ::minBagInterval;
+        settingsDoc["autoReset"] = ::autoReset;
+        
+        File file = LittleFS.open("/settings.json", "w");
+        if (file) {
+          serializeJson(settingsDoc, file);
+          file.close();
+          Serial.println("✅ MQTT: Settings saved to file");
+        }
+      }
+      
+      // Legacy targets
       if (doc.containsKey("target")) {
         targetCount = doc["target"];
         Serial.println("Target updated via MQTT: " + String(targetCount));
@@ -1853,12 +1967,40 @@ void setupWebServer() {
       DynamicJsonDocument doc(1024);
       deserializeJson(doc, server.arg("plain"));
       
-      String conveyorName = doc["conveyorName"];
-      int brightness = doc["brightness"];
-      int sensorDelay = doc["sensorDelay"];
-      int bagDetectionDelay = doc["bagDetectionDelay"];
-      int minBagInterval = doc["minBagInterval"];
-      bool autoReset = doc["autoReset"];
+      // ÁP DỤNG SETTINGS NGAY LẬP TỨC VÀO BIẾN GLOBAL
+      if (doc.containsKey("conveyorName")) {
+        conveyorName = doc["conveyorName"].as<String>();
+        Serial.println("✅ Applied conveyorName: " + conveyorName);
+      }
+      
+      if (doc.containsKey("brightness")) {
+        displayBrightness = doc["brightness"];
+        if (displayBrightness >= 10 && displayBrightness <= 100) {
+          dma_display->setBrightness8(map(displayBrightness, 0, 100, 0, 255));
+          Serial.println("✅ Applied brightness: " + String(displayBrightness) + "%");
+        }
+      }
+      
+      if (doc.containsKey("sensorDelay")) {
+        sensorDelayMs = doc["sensorDelay"];
+        debounceDelay = sensorDelayMs; // Sync debounce delay
+        Serial.println("✅ Applied sensorDelay: " + String(sensorDelayMs) + "ms");
+      }
+      
+      if (doc.containsKey("bagDetectionDelay")) {
+        ::bagDetectionDelay = doc["bagDetectionDelay"]; // Sử dụng :: để chỉ biến global
+        Serial.println("✅ Applied bagDetectionDelay: " + String(::bagDetectionDelay) + "ms");
+      }
+      
+      if (doc.containsKey("minBagInterval")) {
+        ::minBagInterval = doc["minBagInterval"]; // Sử dụng :: để chỉ biến global
+        Serial.println("✅ Applied minBagInterval: " + String(::minBagInterval) + "ms");
+      }
+      
+      if (doc.containsKey("autoReset")) {
+        ::autoReset = doc["autoReset"]; // Sử dụng :: để chỉ biến global
+        Serial.println("✅ Applied autoReset: " + String(::autoReset ? "true" : "false"));
+      }
       
       // Cấu hình IP tĩnh Ethernet
       String ethIP = doc["ipAddress"];
@@ -1866,11 +2008,6 @@ void setupWebServer() {
       String ethSubnet = doc["subnet"];
       String ethDNS1 = doc["dns1"];
       String ethDNS2 = doc["dns2"];
-      
-      // Cập nhật cài đặt
-      if (brightness >= 10 && brightness <= 100) {
-        dma_display->setBrightness8(map(brightness, 0, 100, 0, 255));
-      }
       
       // Cập nhật IP tĩnh Ethernet nếu có thay đổi
       bool needRestart = false;
@@ -1910,9 +2047,7 @@ void setupWebServer() {
       }
       
       Serial.println("Settings updated:");
-      Serial.println("Conveyor Name: " + conveyorName);
-      Serial.println("Brightness: " + String(brightness));
-      Serial.println("Sensor Delay: " + String(sensorDelay));
+      Serial.println("Conveyor Name: " + conveyorName); 
       Serial.println("Ethernet IP: " + ethIP);
       
       // Trả về response với thông báo restart nếu cần
@@ -2295,10 +2430,12 @@ void updateDisplay() {
   }
   dma_display->clearScreen();
   
-  // Layout mới:
-  // Dòng 1 bên trái: Loại bao không dấu (NGO) - chữ to
-  // Dòng 2 bên trái: XUAT: [số mục tiêu] 
-  // Bên phải: Số đếm lớn chiếm 2 dòng
+  // 🎨 LAYOUT MỚI ĐƯỢC CẢI TIẾN:
+  // ┌─────────────────────┬──────────────┐
+  // │ GAO THUONG (Size 2) │              │  
+  // │ XUAT: 100  WAIT   │   COUNT: 85  │
+  // │ Auto:ON  23/100   │     │
+  // └─────────────────────┴──────────────┘
   
   // Chuyển đổi tên loại bao không dấu
   String displayType = bagType;
@@ -2370,42 +2507,92 @@ void updateDisplay() {
   displayType.replace("Đ", "D");
   displayType.toUpperCase();
   
-  // Hiển thị loại bao (dòng 1 bên trái) - chữ to không đậm để tránh giật
-  dma_display->setTextSize(2);  // Tăng kích thước chữ
-  dma_display->setTextColor(myYELLOW);
+  // Rút gọn tên sản phẩm nếu quá dài
+  if (displayType.length() > 10) {
+    displayType = displayType.substring(0, 8) + "..";
+  }
   
-  // Vẽ text không đậm để tránh giật LED
-  dma_display->setCursor(2, 3);    // Vị trí gốc
+  // 📍 DÒNG 1: Tên sản phẩm (2 pixel từ trên)
+  dma_display->setTextSize(2);
+  dma_display->setTextColor(myYELLOW);
+  dma_display->setCursor(2, 2);
   dma_display->print(displayType);
   
-  // Hiển thị "XUAT: [target]" (dòng 2 bên trái) - không đậm để tránh dính
+  // 📍 DÒNG 2: Thông tin đơn hàng và trạng thái
   dma_display->setTextSize(1);
   dma_display->setTextColor(myCYAN);
+  dma_display->setCursor(2, 18);
   
-  // Vẽ text XUAT không đậm để tránh dính nhau
-  String xuatText = "XUAT: " + String(targetCount);
-  dma_display->setCursor(2, 21);   // Tăng Y từ 19 lên 21 để tránh dính
-  dma_display->print(xuatText);
+  // Hiển thị target và trạng thái
+  String statusText = "XUAT:" + String(targetCount);
   
-  // Hiển thị số đếm lớn bên phải (chiếm 2 dòng) - TO HƠN NHIỀU
+  // Thêm trạng thái hệ thống
+  if (currentSystemStatus == "RUNNING") {
+    statusText += " RUN";
+  } else if (currentSystemStatus == "PAUSE") {
+    statusText += " PAUSE";  
+  } else if (currentSystemStatus == "RESET") {
+    statusText += " WAIT";
+  }
+  
+  dma_display->print(statusText);
+  
+  // DÒNG 3: Thông tin bổ sung
+  dma_display->setCursor(2, 27);
+  dma_display->setTextColor(myWHITE);
+  
+  String infoText = "";
+  
+  // Hiển thị Auto Reset status
+  if (autoReset) {
+    infoText += "Auto:ON ";
+  }
+  
+  // Hiển thị progress nếu đang chạy
+  if (targetCount > 0) {
+    int progress = (totalCount * 100) / targetCount;
+    infoText += String(totalCount) + "/" + String(targetCount) + " " + String(progress) + "%";
+  }
+  
+  dma_display->print(infoText);
+  
+  // 📍 SỐ ĐẾM LỚN BÊN PHẢI (cải tiến vị trí)
   String countStr = String((int)totalCount);
-  dma_display->setTextSize(4);  // Tăng từ size 3 lên size 4 để TO HƠN
-  dma_display->setTextColor(isLimitReached ? myRED : myGREEN);
+  dma_display->setTextSize(3);  // Giữ size 3 cho cân đối
   
-  // Tính toán vị trí bên phải cho số đếm
+  // Màu sắc thông minh dựa trên tiến độ
+  uint16_t countColor;
+  if (isLimitReached) {
+    countColor = myRED;  // Đỏ khi hoàn thành
+  } else if (targetCount > 0) {
+    int progress = (totalCount * 100) / targetCount;
+    if (progress >= 90) {
+      countColor = myYELLOW;  // Vàng khi gần hoàn thành
+    } else if (progress >= 50) {
+      countColor = myCYAN;    // Xanh dương khi trung bình
+    } else {
+      countColor = myGREEN;   // Xanh lá khi bắt đầu
+    }
+  } else {
+    countColor = myWHITE;     // Trắng khi chưa có target
+  }
+  
+  dma_display->setTextColor(countColor);
+  
+  // Tính toán vị trí căn giữa bên phải
   int16_t x1, y1;
   uint16_t w, h;
   dma_display->getTextBounds(countStr, 0, 0, &x1, &y1, &w, &h);
   
-  // Đặt số đếm ở bên phải màn hình nhưng dịch sang trái hơn
-  int x = (PANEL_RES_X * PANEL_CHAIN) - w - 8;  // Tăng margin từ 3 lên 15 để dịch sang trái
-  int y = (PANEL_RES_Y - h) / 2 + 1;  // Chỉnh xuống 1 đơn vị
+  // Đặt ở 2/3 bên phải màn hình
+  int totalWidth = PANEL_RES_X * PANEL_CHAIN;
+  int x = totalWidth - w - 5;  // 5 pixel margin từ bên phải
+  int y = (PANEL_RES_Y - h) / 2 + 2;  // Căn giữa theo chiều dọc
   
-  // Vẽ số đếm không đậm để tránh nhiễu và giật
-  dma_display->setCursor(x, y);      // Vị trí gốc
+  dma_display->setCursor(x, y);
   dma_display->print(countStr);
   
-  needUpdate = false;  // Đã cập nhật xong
+  needUpdate = false;
 }
 
 void updateCount() {
@@ -2458,6 +2645,66 @@ void updateCount() {
       // MQTT: Publish final status
       publishStatusMQTT();
       
+      // Auto Reset nếu được bật từ settings - CHỈ RESET ĐơN HÀNG HIỆN TẠI
+      if (autoReset && totalCount >= targetCount) {
+        Serial.println("🔄 Auto Reset enabled - resetting CURRENT ORDER only");
+        delay(2000); // Chờ 2 giây để hiển thị kết quả hoàn thành
+        
+        // ✅ CHỈ RESET ĐƠN HÀNG HIỆN TẠI, GIỮ NGUYÊN DANH SÁCH
+        String completedOrderType = bagType;  // Lưu tên đơn vừa hoàn thành
+        
+        // Reset count và trạng thái đếm
+        totalCount = 0;
+        isLimitReached = false;
+        isRunning = false;
+        isTriggerEnabled = false;
+        isCountingEnabled = false;
+        startTimeStr = "";
+        timeWaitingForSync = false;
+        currentSystemStatus = "RESET";
+        
+        // ✅ CHỈ RESET ĐƠN HÀNG HIỆN TẠI trong bagConfigs
+        for (auto& cfg : bagConfigs) {
+          if (cfg.type == completedOrderType) {
+            cfg.status = "COMPLETED";  // Đánh dấu hoàn thành, không xóa
+            Serial.println("✅ Order '" + completedOrderType + "' marked as COMPLETED");
+            break;
+          }
+        }
+        
+        // ✅ TỰ ĐỘNG CHUYỂN SANG ĐƠN HÀNG TIẾP THEO (nếu có)
+        bool foundNextOrder = false;
+        for (auto& cfg : bagConfigs) {
+          if (cfg.status == "WAIT" || cfg.status == "SELECTED") {
+            // Chuyển sang đơn hàng tiếp theo
+            bagType = cfg.type;
+            targetCount = cfg.target;
+            cfg.status = "SELECTED";
+            foundNextOrder = true;
+            
+            Serial.println("🎯 Auto switched to next order: " + bagType);
+            Serial.println("   Target: " + String(targetCount) + " bags");
+            break;
+          }
+        }
+        
+        if (!foundNextOrder) {
+          // Không còn đơn hàng nào -> Giữ nguyên đơn cuối
+          Serial.println("ℹ️ No more orders in queue - staying on completed order");
+          bagType = completedOrderType;
+          targetCount = 0;  // Set target = 0 để báo hiệu hoàn thành hết
+        }
+        
+        saveBagConfigsToFile();
+        updateStartLED();
+        updateDoneLED();
+        needUpdate = true;
+        
+        Serial.println("✅ Auto Reset completed - ready for next order");
+        publishAlert("AUTO_RESET", "Đơn hàng '" + completedOrderType + "' hoàn thành. " + 
+                    (foundNextOrder ? "Chuyển sang: " + bagType : "Hết đơn hàng"));
+      }
+      
       // Legacy MQTT (giữ lại để tương thích)
       DynamicJsonDocument doc(256);
       doc["count"] = totalCount;
@@ -2498,13 +2745,22 @@ void setup() {
   WRITE_PERI_REG(RTC_CNTL_BROWN_OUT_REG, 0);
   
   Serial.begin(115200);
-  Serial.println("Booting...");
+  Serial.println("🚀 Booting ESP32 Bag Counter System...");
   LittleFS.begin();
   
-  // Load cấu hình từ file
+  // BƯỚC 1: Load cấu hình từ file (ghi đè default values)
+  Serial.println("📂 Loading configurations from files...");
   loadBagTypesFromFile();
   loadBagConfigsFromFile();
-  loadSettingsFromFile();  // Load cài đặt chung bao gồm IP Ethernet
+  loadSettingsFromFile();  // ⚡ Load và ghi đè tất cả default values
+  
+  Serial.println("✅ Settings loaded and applied (web values override defaults):");
+  Serial.println("  - conveyorName: " + conveyorName);
+  Serial.println("  - brightness: " + String(displayBrightness) + "% (will apply after display init)");
+  Serial.println("  - sensorDelay: " + String(sensorDelayMs) + "ms");
+  Serial.println("  - bagDetectionDelay: " + String(bagDetectionDelay) + "ms");
+  Serial.println("  - minBagInterval: " + String(minBagInterval) + "ms");
+  Serial.println("  - autoReset: " + String(autoReset ? "true" : "false"));
   
   // Khởi tạo chân cảm biến và LED
   pinMode(SENSOR_PIN, INPUT_PULLUP);
@@ -2547,6 +2803,12 @@ void setup() {
   mxconfig.i2sspeed = HUB75_I2S_CFG::HZ_10M;
   dma_display = new MatrixPanel_I2S_DMA(mxconfig);
   dma_display->begin();
+  
+  // Áp dụng brightness từ settings ngay sau khi display init
+  if (displayBrightness >= 10 && displayBrightness <= 100) {
+    dma_display->setBrightness8(map(displayBrightness, 0, 100, 0, 255));
+    Serial.println("✅ Display brightness applied: " + String(displayBrightness) + "%");
+  }
   
   // Load brightness từ settings
   int savedBrightness = 35; // default
@@ -2642,34 +2904,87 @@ void loop() {
     lastTriggerState = triggerReading;
   }
 
-  // Chỉ đếm khi được kích hoạt
-  if (isCountingEnabled) {
+  // Chỉ đếm khi được kích hoạt - SỬ DỤNG SETTINGS ĐỒNG BỘ
+  if (isCountingEnabled && isRunning && !isLimitReached) {
     int reading = digitalRead(SENSOR_PIN);
     
+    // Sử dụng sensorDelayMs từ settings thay vì debounceDelay cố định
     if (reading != lastSensorState) {
       lastDebounceTime = millis();
     }
     
-    if ((millis() - lastDebounceTime) > debounceDelay) {
+    if ((millis() - lastDebounceTime) > sensorDelayMs) {
       if (reading != sensorState) {
         sensorState = reading;
-        if (sensorState == LOW && isRunning && !isLimitReached) {
-          Serial.print("COUNT SENSOR: Phat hien tui! Count: ");
-          Serial.print(totalCount);
-          Serial.print(" -> ");
-          Serial.println(totalCount + 1);
-          updateCount();
-          needUpdate = true;
-        } else if (sensorState == LOW) {
-          Serial.print("COUNT SENSOR: Phat hien nhung khong dem (isRunning=");
-          Serial.print(isRunning);
-          Serial.print(", isLimitReached=");
-          Serial.print(isLimitReached);
-          Serial.println(")");
+        
+        if (sensorState == LOW) {  // Phát hiện bao
+          unsigned long currentTime = millis();
+          
+          // Kiểm tra khoảng cách tối thiểu giữa 2 bao (minBagInterval từ settings)
+          if (currentTime - lastBagTime >= minBagInterval) {
+            
+            if (!isBagDetected) {
+              // Bắt đầu phát hiện bao mới
+              isBagDetected = true;
+              bagStartTime = currentTime;
+              Serial.print("🎯 BẮT ĐẦU phát hiện bao - thời gian xác nhận: ");
+              Serial.print(bagDetectionDelay);
+              Serial.println("ms");
+            }
+            
+          } else {
+            Serial.print("⏰ Chờ khoảng cách tối thiểu (");
+            Serial.print(minBagInterval);
+            Serial.print("ms), còn lại: ");
+            Serial.print(minBagInterval - (currentTime - lastBagTime));
+            Serial.println("ms");
+          }
+          
+        } else {
+          // Sensor không phát hiện
+          if (isBagDetected) {
+            unsigned long detectionDuration = millis() - bagStartTime;
+            
+            // Kiểm tra thời gian xác nhận đủ lâu (bagDetectionDelay từ settings)
+            if (detectionDuration >= bagDetectionDelay) {
+              // XÁC NHẬN BAO HỢP LỆ - ĐẾM!
+              Serial.print("✅ XÁC NHẬN BAO! Thời gian phát hiện: ");
+              Serial.print(detectionDuration);
+              Serial.print("ms >= ");
+              Serial.print(bagDetectionDelay);
+              Serial.print("ms. Count: ");
+              Serial.print(totalCount);
+              Serial.print(" -> ");
+              Serial.println(totalCount + 1);
+              
+              updateCount();
+              needUpdate = true;
+              lastBagTime = millis();
+              
+              // MQTT: Publish sensor data khi đếm thành công
+              publishSensorData();
+              
+            } else {
+              Serial.print("❌ BAO KHÔNG HỢP LỆ - thời gian quá ngắn: ");
+              Serial.print(detectionDuration);
+              Serial.print("ms < ");
+              Serial.print(bagDetectionDelay);
+              Serial.println("ms");
+            }
+            
+            isBagDetected = false;
+          }
         }
       }
     }
     lastSensorState = reading;
+    
+  } else if (isCountingEnabled && !isRunning) {
+    // Đã kích hoạt counting nhưng hệ thống đang pause
+    int reading = digitalRead(SENSOR_PIN);
+    if (reading == LOW) {
+      Serial.println("📦 Phát hiện bao nhưng hệ thống đang PAUSE");
+    }
   }
 
   if (isLimitReached && !finishedBlinking) {
@@ -2734,6 +3049,3 @@ void loop() {
   server.handleClient();
 }
 //<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
-
-
-
