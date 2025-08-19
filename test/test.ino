@@ -3,7 +3,7 @@
 #include "soc/soc.h"
 #include "soc/rtc_cntl_reg.h"
 #include <ESP32-HUB75-MatrixPanel-I2S-DMA.h>
-#include <WebServer_ESP32_SC_W5500.h>
+#include <WebServer_ESP32_W5500.h>
 
 // Force use ESP32 WiFi library
 #ifdef ARDUINO_ARCH_ESP32
@@ -91,20 +91,22 @@ WiFiClient ethClient;
 PubSubClient mqtt(ethClient);
 
 //----------------------------------------Defines the connected PIN between P5 and ESP32.
-#define R1_PIN 10
-#define G1_PIN 46
-#define B1_PIN 3
-#define R2_PIN 18
-#define G2_PIN 17
-#define B2_PIN 16
-#define A_PIN 14
-#define B_PIN 13
-#define C_PIN 12
-#define D_PIN 11
-#define E_PIN -1  //--> required for 1/32 scan panels, like 64x64px. Any available pin would do, i.e. IO32.
-#define LAT_PIN 7
-#define OE_PIN 21
-#define CLK_PIN 15
+#define R1_PIN 19 
+#define G1_PIN 13
+#define B1_PIN 18
+#define R2_PIN 5
+#define G2_PIN 12
+#define B2_PIN 17
+
+#define A_PIN 16
+#define B_PIN 14
+#define C_PIN 4
+#define D_PIN 27
+#define E_PIN -1  //--> required for 1/32 scan panels, like 64x64px. Any available pin would do, i.e. IO32
+
+#define LAT_PIN 26
+#define OE_PIN 15
+#define CLK_PIN 2
 /*
 #define R1_PIN 19 
 #define G1_PIN 13
@@ -2483,10 +2485,10 @@ void updateDisplay() {
   }
   dma_display->clearScreen();
   
-  //  LAYOUT ĐƯỢC TỐI ƯU HOÁ (2 dòng):
+  //  LAYOUT THEO YÊU CẦU (2 dòng):
   // ┌─────────────────────┬──────────────┐
-  // │ GAO (Size 3)        │   COUNT: 85  │  
-  // │ XUAT: 100  WAIT     │   (Size 3)   │
+  // │ GAO THUONG (Size 2) │   "85" Size3 │  
+  // │ XUAT: 100  WAIT     │   (màu đỏ)   │
   // └─────────────────────┴──────────────┘
   
   // Chuyển đổi tên loại bao không dấu
@@ -2559,72 +2561,56 @@ void updateDisplay() {
   displayType.replace("Đ", "D");
   displayType.toUpperCase();
   
-  // Rút gọn tên sản phẩm nếu quá dài
-  if (displayType.length() > 6) {
-    displayType = displayType.substring(0, 5) + "..";
+  // Rút gọn tên sản phẩm nếu quá dài (cho size 2)
+  if (displayType.length() > 5) {
+    displayType = displayType.substring(0, 4) + "..";
   }
   
-  // 📍 DÒNG 1: Tên sản phẩm (Size 3 để to hơn)
-  dma_display->setTextSize(3);
-  dma_display->setTextColor(myYELLOW);
-  dma_display->setCursor(2, 2);
-  dma_display->print(displayType);
-  
-  // 📍 DÒNG 2: Thông tin đơn hàng và trạng thái (Size 2 để to hơn)
+  // 📍 DÒNG 1: Tên sản phẩm + Trạng thái bên trái (Size 2)
   dma_display->setTextSize(2);
-  dma_display->setTextColor(myCYAN);
-  dma_display->setCursor(2, 20);
+  dma_display->setTextColor(myYELLOW);
+  dma_display->setCursor(1, 2);
   
-  // Hiển thị target và trạng thái
-  String statusText = String(targetCount);
+  String line1 = displayType;
   
-  // Thêm trạng thái hệ thống
+  // Thêm trạng thái vào dòng 1
   if (currentSystemStatus == "RUNNING") {
-    statusText += " RUN";
+    line1 += " RUN";
   } else if (currentSystemStatus == "PAUSE") {
-    statusText += " PAU";  
+    line1 += " PAU";
   } else if (currentSystemStatus == "RESET") {
-    statusText += " WAIT";
-  }
-  
-  dma_display->print(statusText);
-  
-  
-  // 📍 SỐ ĐẾM LỚN BÊN PHẢI (Size 4 để to hơn)
-  String countStr = String((int)totalCount);
-  dma_display->setTextSize(4);  // Tăng từ 3 lên 4
-  
-  // Màu sắc thông minh dựa trên tiến độ
-  uint16_t countColor;
-  if (isLimitReached) {
-    countColor = myRED;  // Đỏ khi hoàn thành
-  } else if (targetCount > 0) {
-    int progress = (totalCount * 100) / targetCount;
-    if (progress >= 90) {
-      countColor = myYELLOW;  // Vàng khi gần hoàn thành
-    } else if (progress >= 50) {
-      countColor = myCYAN;    // Xanh dương khi trung bình
-    } else {
-      countColor = myGREEN;   // Xanh lá khi bắt đầu
-    }
+    line1 += " WAIT";
   } else {
-    countColor = myWHITE;     // Trắng khi chưa có target
+    line1 += " STOP";
   }
   
-  dma_display->setTextColor(countColor);
+  dma_display->print(line1);
   
-  // Tính toán vị trí căn giữa bên phải
+  // 📍 SỐ ĐẾM LỚN BÊN PHẢI DÒNG 1 (Size 3, màu đỏ)
+  String countStr = String((int)totalCount);
+  dma_display->setTextSize(3);
+  dma_display->setTextColor(myRED);  // Màu đỏ theo yêu cầu
+  
+  // Tính toán vị trí căn phải
   int16_t x1, y1;
   uint16_t w, h;
   dma_display->getTextBounds(countStr, 0, 0, &x1, &y1, &w, &h);
   
-  // Đặt ở 2/3 bên phải màn hình
+  // Đặt ở bên phải màn hình
   int totalWidth = PANEL_RES_X * PANEL_CHAIN;
-  int x = totalWidth - w - 3;  // 3 pixel margin từ bên phải
-  int y = (PANEL_RES_Y - h) / 2;  // Căn giữa theo chiều dọc
+  int x = totalWidth - w - 2;  // 2 pixel margin từ bên phải
+  int y = 1;  // Căn với dòng 1
   
   dma_display->setCursor(x, y);
   dma_display->print(countStr);
+  
+  // 📍 DÒNG 2: Chỉ hiển thị Target (Size 2)
+  dma_display->setTextSize(2);
+  dma_display->setTextColor(myCYAN);
+  dma_display->setCursor(1, 18);  // Dòng 2 ở y=18
+  
+  String line2 = "XUAT:" + String(targetCount);
+  dma_display->print(line2);
   
   needUpdate = false;
 }
@@ -2681,10 +2667,10 @@ void updateCount() {
       
       // Auto Reset nếu được bật từ settings - CHỈ RESET ĐơN HÀNG HIỆN TẠI
       if (autoReset && totalCount >= targetCount) {
-        Serial.println("🔄 Auto Reset enabled - resetting CURRENT ORDER only");
+        Serial.println(" Auto Reset enabled - resetting CURRENT ORDER only");
         delay(2000); // Chờ 2 giây để hiển thị kết quả hoàn thành
         
-        // ✅ CHỈ RESET ĐƠN HÀNG HIỆN TẠI, GIỮ NGUYÊN DANH SÁCH
+        //  CHỈ RESET ĐƠN HÀNG HIỆN TẠI, GIỮ NGUYÊN DANH SÁCH
         String completedOrderType = bagType;  // Lưu tên đơn vừa hoàn thành
         
         // Reset count và trạng thái đếm
@@ -2697,16 +2683,16 @@ void updateCount() {
         timeWaitingForSync = false;
         currentSystemStatus = "RESET";
         
-        // ✅ CHỈ RESET ĐƠN HÀNG HIỆN TẠI trong bagConfigs
+        //  CHỈ RESET ĐƠN HÀNG HIỆN TẠI trong bagConfigs
         for (auto& cfg : bagConfigs) {
           if (cfg.type == completedOrderType) {
             cfg.status = "COMPLETED";  // Đánh dấu hoàn thành, không xóa
-            Serial.println("✅ Order '" + completedOrderType + "' marked as COMPLETED");
+            Serial.println(" Order '" + completedOrderType + "' marked as COMPLETED");
             break;
           }
         }
         
-        // ✅ TỰ ĐỘNG CHUYỂN SANG ĐƠN HÀNG TIẾP THEO (nếu có)
+        //  TỰ ĐỘNG CHUYỂN SANG ĐƠN HÀNG TIẾP THEO (nếu có)
         bool foundNextOrder = false;
         for (auto& cfg : bagConfigs) {
           if (cfg.status == "WAIT" || cfg.status == "SELECTED") {
@@ -3083,6 +3069,3 @@ void loop() {
   server.handleClient();
 }
 //<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
-
-
-
