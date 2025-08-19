@@ -3,7 +3,7 @@
 #include "soc/soc.h"
 #include "soc/rtc_cntl_reg.h"
 #include <ESP32-HUB75-MatrixPanel-I2S-DMA.h>
-#include <WebServer_ESP32_W5500.h>
+#include <WebServer_ESP32_SC_W5500.h>
 
 // Force use ESP32 WiFi library
 #ifdef ARDUINO_ARCH_ESP32
@@ -16,7 +16,7 @@
 #include <time.h>
 #include <vector>
 #include <FS.h>
-  #include <IRremote.h> 1Q
+#include <IRremote.h>
 
 //----------------------------------------W5500 Ethernet config
 // W5500 SPI pin definitions
@@ -91,6 +91,21 @@ WiFiClient ethClient;
 PubSubClient mqtt(ethClient);
 
 //----------------------------------------Defines the connected PIN between P5 and ESP32.
+#define R1_PIN 10
+#define G1_PIN 46
+#define B1_PIN 3
+#define R2_PIN 18
+#define G2_PIN 17
+#define B2_PIN 16
+#define A_PIN 14
+#define B_PIN 13
+#define C_PIN 12
+#define D_PIN 11
+#define E_PIN -1  //--> required for 1/32 scan panels, like 64x64px. Any available pin would do, i.e. IO32.
+#define LAT_PIN 7
+#define OE_PIN 21
+#define CLK_PIN 15
+/*
 #define R1_PIN 19 
 #define G1_PIN 13
 #define B1_PIN 18
@@ -107,6 +122,7 @@ PubSubClient mqtt(ethClient);
 #define LAT_PIN 26
 #define OE_PIN 15
 #define CLK_PIN 2
+*/
 
 //----------------------------------------Sensor pin
 #define SENSOR_PIN 4 // Chân kết nối cảm biến t61
@@ -1970,36 +1986,36 @@ void setupWebServer() {
       // ÁP DỤNG SETTINGS NGAY LẬP TỨC VÀO BIẾN GLOBAL
       if (doc.containsKey("conveyorName")) {
         conveyorName = doc["conveyorName"].as<String>();
-        Serial.println("✅ Applied conveyorName: " + conveyorName);
+        Serial.println("Applied conveyorName: " + conveyorName);
       }
       
       if (doc.containsKey("brightness")) {
         displayBrightness = doc["brightness"];
         if (displayBrightness >= 10 && displayBrightness <= 100) {
           dma_display->setBrightness8(map(displayBrightness, 0, 100, 0, 255));
-          Serial.println("✅ Applied brightness: " + String(displayBrightness) + "%");
+          Serial.println("Applied brightness: " + String(displayBrightness) + "%");
         }
       }
       
       if (doc.containsKey("sensorDelay")) {
         sensorDelayMs = doc["sensorDelay"];
         debounceDelay = sensorDelayMs; // Sync debounce delay
-        Serial.println("✅ Applied sensorDelay: " + String(sensorDelayMs) + "ms");
+        Serial.println("Applied sensorDelay: " + String(sensorDelayMs) + "ms");
       }
       
       if (doc.containsKey("bagDetectionDelay")) {
         ::bagDetectionDelay = doc["bagDetectionDelay"]; // Sử dụng :: để chỉ biến global
-        Serial.println("✅ Applied bagDetectionDelay: " + String(::bagDetectionDelay) + "ms");
+        Serial.println("Applied bagDetectionDelay: " + String(::bagDetectionDelay) + "ms");
       }
       
       if (doc.containsKey("minBagInterval")) {
         ::minBagInterval = doc["minBagInterval"]; // Sử dụng :: để chỉ biến global
-        Serial.println("✅ Applied minBagInterval: " + String(::minBagInterval) + "ms");
+        Serial.println("Applied minBagInterval: " + String(::minBagInterval) + "ms");
       }
       
       if (doc.containsKey("autoReset")) {
         ::autoReset = doc["autoReset"]; // Sử dụng :: để chỉ biến global
-        Serial.println("✅ Applied autoReset: " + String(::autoReset ? "true" : "false"));
+        Serial.println("Applied autoReset: " + String(::autoReset ? "true" : "false"));
       }
       
       // Cấu hình IP tĩnh Ethernet
@@ -2047,7 +2063,9 @@ void setupWebServer() {
       }
       
       Serial.println("Settings updated:");
-      Serial.println("Conveyor Name: " + conveyorName); 
+      Serial.println("Conveyor Name: " + conveyorName);
+      Serial.println("Brightness: " + String(displayBrightness));
+      Serial.println("Sensor Delay: " + String(sensorDelayMs));
       Serial.println("Ethernet IP: " + ethIP);
       
       // Trả về response với thông báo restart nếu cần
@@ -2100,7 +2118,41 @@ void setupWebServer() {
   server.on("/api/wifi/scan", HTTP_GET, [](){
     server.sendHeader("Access-Control-Allow-Origin", "*");
     
-    int n = WiFi.scanNetworks();
+    Serial.println("📡 WiFi scan requested");
+    
+    // Ensure WiFi is initialized for scanning
+    if (WiFi.getMode() == WIFI_OFF) {
+      Serial.println("  🔧 Initializing WiFi for scan...");
+      WiFi.mode(WIFI_STA);
+      delay(100); // Allow WiFi to initialize
+    }
+    
+    Serial.println("  🔍 Scanning networks...");
+    int n = WiFi.scanNetworks(false, false, false, 300); // Async=false, show_hidden=false, passive=false, max_ms_per_chan=300
+    
+    if (n == -1) {
+      Serial.println("  ❌ WiFi scan failed");
+      DynamicJsonDocument errorDoc(256);
+      errorDoc["error"] = "WiFi scan failed - hardware issue";
+      errorDoc["networks"] = JsonArray();
+      String errorOut;
+      serializeJson(errorDoc, errorOut);
+      server.send(500, "application/json", errorOut);
+      return;
+    }
+    
+    if (n == 0) {
+      Serial.println("  ⚠️ No networks found");
+      DynamicJsonDocument doc(256);
+      doc["networks"] = JsonArray();
+      String out;
+      serializeJson(doc, out);
+      server.send(200, "application/json", out);
+      return;
+    }
+    
+    Serial.println("  ✅ Found " + String(n) + " networks");
+    
     DynamicJsonDocument doc(2048);
     JsonArray networks = doc.createNestedArray("networks");
     
@@ -2109,6 +2161,7 @@ void setupWebServer() {
       network["ssid"] = WiFi.SSID(i);
       network["rssi"] = WiFi.RSSI(i);
       network["encrypted"] = (WiFi.encryptionType(i) != WIFI_AUTH_OPEN);
+      Serial.println("    📶 " + WiFi.SSID(i) + " (" + String(WiFi.RSSI(i)) + " dBm)");
     }
     
     String out;
@@ -2430,11 +2483,10 @@ void updateDisplay() {
   }
   dma_display->clearScreen();
   
-  // 🎨 LAYOUT MỚI ĐƯỢC CẢI TIẾN:
+  //  LAYOUT ĐƯỢC TỐI ƯU HOÁ (2 dòng):
   // ┌─────────────────────┬──────────────┐
-  // │ GAO THUONG (Size 2) │              │  
-  // │ XUAT: 100  WAIT   │   COUNT: 85  │
-  // │ Auto:ON  23/100   │     │
+  // │ GAO (Size 3)        │   COUNT: 85  │  
+  // │ XUAT: 100  WAIT     │   (Size 3)   │
   // └─────────────────────┴──────────────┘
   
   // Chuyển đổi tên loại bao không dấu
@@ -2508,57 +2560,39 @@ void updateDisplay() {
   displayType.toUpperCase();
   
   // Rút gọn tên sản phẩm nếu quá dài
-  if (displayType.length() > 10) {
-    displayType = displayType.substring(0, 8) + "..";
+  if (displayType.length() > 6) {
+    displayType = displayType.substring(0, 5) + "..";
   }
   
-  // 📍 DÒNG 1: Tên sản phẩm (2 pixel từ trên)
-  dma_display->setTextSize(2);
+  // 📍 DÒNG 1: Tên sản phẩm (Size 3 để to hơn)
+  dma_display->setTextSize(3);
   dma_display->setTextColor(myYELLOW);
   dma_display->setCursor(2, 2);
   dma_display->print(displayType);
   
-  // 📍 DÒNG 2: Thông tin đơn hàng và trạng thái
-  dma_display->setTextSize(1);
+  // 📍 DÒNG 2: Thông tin đơn hàng và trạng thái (Size 2 để to hơn)
+  dma_display->setTextSize(2);
   dma_display->setTextColor(myCYAN);
-  dma_display->setCursor(2, 18);
+  dma_display->setCursor(2, 20);
   
   // Hiển thị target và trạng thái
-  String statusText = "XUAT:" + String(targetCount);
+  String statusText = String(targetCount);
   
   // Thêm trạng thái hệ thống
   if (currentSystemStatus == "RUNNING") {
     statusText += " RUN";
   } else if (currentSystemStatus == "PAUSE") {
-    statusText += " PAUSE";  
+    statusText += " PAU";  
   } else if (currentSystemStatus == "RESET") {
     statusText += " WAIT";
   }
   
   dma_display->print(statusText);
   
-  // DÒNG 3: Thông tin bổ sung
-  dma_display->setCursor(2, 27);
-  dma_display->setTextColor(myWHITE);
   
-  String infoText = "";
-  
-  // Hiển thị Auto Reset status
-  if (autoReset) {
-    infoText += "Auto:ON ";
-  }
-  
-  // Hiển thị progress nếu đang chạy
-  if (targetCount > 0) {
-    int progress = (totalCount * 100) / targetCount;
-    infoText += String(totalCount) + "/" + String(targetCount) + " " + String(progress) + "%";
-  }
-  
-  dma_display->print(infoText);
-  
-  // 📍 SỐ ĐẾM LỚN BÊN PHẢI (cải tiến vị trí)
+  // 📍 SỐ ĐẾM LỚN BÊN PHẢI (Size 4 để to hơn)
   String countStr = String((int)totalCount);
-  dma_display->setTextSize(3);  // Giữ size 3 cho cân đối
+  dma_display->setTextSize(4);  // Tăng từ 3 lên 4
   
   // Màu sắc thông minh dựa trên tiến độ
   uint16_t countColor;
@@ -2586,8 +2620,8 @@ void updateDisplay() {
   
   // Đặt ở 2/3 bên phải màn hình
   int totalWidth = PANEL_RES_X * PANEL_CHAIN;
-  int x = totalWidth - w - 5;  // 5 pixel margin từ bên phải
-  int y = (PANEL_RES_Y - h) / 2 + 2;  // Căn giữa theo chiều dọc
+  int x = totalWidth - w - 3;  // 3 pixel margin từ bên phải
+  int y = (PANEL_RES_Y - h) / 2;  // Căn giữa theo chiều dọc
   
   dma_display->setCursor(x, y);
   dma_display->print(countStr);
@@ -3049,3 +3083,6 @@ void loop() {
   server.handleClient();
 }
 //<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+
+
+
