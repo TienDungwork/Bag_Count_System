@@ -544,11 +544,26 @@
               </div>
             </div>
             
-            <button class="btn-success" onclick="saveGeneralSettings()">
+            <button class="btn-success" onclick="saveSettings()">
               <i class="fas fa-save"></i> Lưu cài đặt
             </button>
             <button class="btn-info" onclick="checkESP32Data()" style="margin-left: 10px;">
               <i class="fas fa-info-circle"></i> Kiểm tra dữ liệu ESP32
+            </button>
+            <button class="btn-info" onclick="debugESP32Settings()" style="margin-left: 10px;">
+              <i class="fas fa-bug"></i> Debug Settings
+            </button>
+            <button class="btn-info" onclick="compareSettings()" style="margin-left: 10px;">
+              <i class="fas fa-balance-scale"></i> So sánh Settings
+            </button>
+            <button class="btn-warning" onclick="forceRefreshFromESP32()" style="margin-left: 10px;">
+              <i class="fas fa-sync-alt"></i> Tải lại từ ESP32
+            </button>
+            <button class="btn-warning" onclick="sendOrderBatchesToESP32()" style="margin-left: 10px;">
+              <i class="fas fa-upload"></i> Force sync Orders
+            </button>
+            <button class="btn-danger" onclick="resetAllDataToDefault()" style="margin-left: 10px;">
+              <i class="fas fa-trash-alt"></i> Reset tất cả
             </button>
           </div>
         </div>
