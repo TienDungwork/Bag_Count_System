@@ -25,7 +25,7 @@ let lastMqttUpdate = 0;
 
 // API polling configuration (reduced frequency for management data only)
 let apiPollingInterval = null;
-const API_POLL_FREQUENCY = 30000; // 30 seconds instead of 1 second - only for management data
+const API_POLL_FREQUENCY = 1000; // 60 seconds - chỉ cho management data, không cho real-time count
 
 let settings = {
   conveyorName: 'BT-001',
@@ -41,41 +41,30 @@ let settings = {
 
 // Initialize application
 document.addEventListener('DOMContentLoaded', async function() {
-  console.log('🚀 Starting application with ESP32-first priority...');
-  
-  // ⚡ THAY ĐỔI LOGIC: LOAD TRỰC TIẾP TỪ ESP32 TRƯỚC, localStorage sau
+  // Load data from ESP32 first, fallback to localStorage
   try {
-    console.log('📡 Loading ALL data from ESP32 (priority)...');
     await loadAllDataFromESP32();
-    console.log('✅ ESP32 data loaded successfully');
-    
   } catch (error) {
-    console.log('❌ ESP32 load failed, fallback to localStorage:', error);
-    // Chỉ fallback nếu ESP32 hoàn toàn không hoạt động
     loadSettings();
     loadProducts();
     loadOrderBatches();
     loadHistory();
   }
   
-  // Cập nhật UI sau khi có data
-  updateBatchSelector();
   updateCurrentBatchSelect();
   updateProductTable();
   updateBatchDisplay();
   updateOverview();
-  updateConveyorNameDisplay(); // ⚡ Cập nhật tên băng tải
+  updateConveyorNameDisplay();
   showTab('overview');
   
-  // Initialize MQTT Client (preferred for real-time data)
-  console.log('🔌 Initializing MQTT...');
+  // Initialize MQTT Client
   initMQTTClient();
   
-  // Start reduced API polling for management data only (30s interval)
+  // Start background sync
   setTimeout(() => {
-    console.log('⏰ Starting background sync...');
     startManagementAPIPolling();
-  }, 3000); // Delay to let MQTT connect first
+  }, 3000);
   
   // Setup brightness slider
   const brightnessSlider = document.getElementById('brightness');
@@ -112,6 +101,9 @@ async function loadAllDataFromESP32() {
     
     // Load orders từ ESP32  
     await loadOrdersFromESP32();
+    
+    // Load order batches từ ESP32
+    await loadOrderBatchesFromESP32();
     
     // Load history từ ESP32
     await loadHistoryFromESP32();
@@ -616,7 +608,6 @@ function initMQTTClient() {
         }
         
         const brokerUrl = brokers[brokerIndex];
-        console.log(`🔌 Trying MQTT broker ${brokerIndex + 1}/${brokers.length}:`, brokerUrl);
         
         mqttClient = mqtt.connect(brokerUrl, {
           clientId: `WebClient_${Date.now()}`,
@@ -635,7 +626,14 @@ function initMQTTClient() {
         
         mqttClient.on('message', function(topic, message) {
           try {
-            const data = JSON.parse(message.toString());
+            const messageStr = message.toString();
+            const data = JSON.parse(messageStr);
+            
+            // Debug real-time count updates  
+            if (topic === 'bagcounter/count') {
+              console.log('⚡ MQTT Count:', data.count, 'Target:', data.target, 'Type:', data.type);
+            }
+            
             handleMQTTMessage(topic, data).catch(error => {
               console.error('MQTT message handler error:', error);
             });
@@ -645,7 +643,6 @@ function initMQTTClient() {
         });
         
         mqttClient.on('error', function(error) {
-          console.error(`❌ MQTT Error on broker ${brokerIndex + 1}:`, error);
           brokerIndex++;
           if (brokerIndex < brokers.length) {
             console.log('🔄 Trying next broker...');
@@ -669,13 +666,10 @@ function initMQTTClient() {
       tryNextBroker();
       
     } else {
-      console.log('MQTT library not available, using API-only mode');
       startStatusPollingFallback();
     }
     
   } catch (error) {
-    console.error('Failed to initialize MQTT client:', error);
-    console.log('Falling back to API-only mode');
     startStatusPollingFallback();
   }
 }
@@ -689,15 +683,13 @@ function subscribeMQTTTopics() {
     'bagcounter/alerts',
     'bagcounter/sensor',
     'bagcounter/heartbeat',
-    'bagcounter/ir_command'  // ✅ Add IR command subscription để nhận real-time IR remote
+    'bagcounter/ir_command'
   ];
   
   topics.forEach(topic => {
     mqttClient.subscribe(topic, function(err) {
       if (err) {
         console.error(`Failed to subscribe to ${topic}:`, err);
-      } else {
-        console.log(`Subscribed to ${topic}`);
       }
     });
   });
@@ -706,7 +698,6 @@ function subscribeMQTTTopics() {
 // Handle MQTT Messages
 async function handleMQTTMessage(topic, data) {
   lastMqttUpdate = Date.now();
-  //console.log('MQTT Message:', topic, data);
   
   switch (topic) {
     case 'bagcounter/status':
@@ -727,7 +718,6 @@ async function handleMQTTMessage(topic, data) {
       break;
       
     case 'bagcounter/ir_command':
-      console.log('🎛️ IR Remote Command received:', data);
       await handleIRCommandMessage(data);
       break;
       
@@ -749,10 +739,10 @@ async function updateDeviceStatus(data) {
   
   // Sync device status with web counting state
   if (data.status) {
-    console.log('Syncing device status:', data.status, 'with web state:', countingState.isActive);
+    console.log('📡 MQTT Status update:', data.status, 'web state:', countingState.isActive);
     
     if (data.status === 'RUNNING' && !countingState.isActive) {
-      console.log('IR Remote START detected - updating web state');
+      console.log('🎛️ IR Remote START detected - updating web state');
       countingState.isActive = true;
       
       // Find active batch and set a counting order if none
@@ -832,9 +822,73 @@ async function updateDeviceStatus(data) {
 }
 
 async function handleCountUpdate(data) {
-  console.log('Count update from MQTT:', data);
+  console.log('⚡ MQTT Real-time count:', data.count, 'type:', data.type, 'progress:', data.progress + '%');
+  
+  // REAL-TIME UPDATE - chỉ cập nhật UI, không save to ESP32
   if (data.count !== undefined) {
-    await updateStatusFromDevice(data);
+    const activeBatch = orderBatches.find(b => b.isActive);
+    if (activeBatch && countingState.isActive) {
+      const selectedOrders = activeBatch.orders.filter(o => o.selected);
+      const currentOrderIndex = selectedOrders.findIndex(o => o.status === 'counting');
+      
+      if (currentOrderIndex >= 0) {
+        const currentOrder = selectedOrders[currentOrderIndex];
+        const totalCountFromDevice = data.count;
+        
+        // Tính số đếm đã hoàn thành từ các đơn hàng trước đó
+        let completedCount = 0;
+        for (let i = 0; i < currentOrderIndex; i++) {
+          if (selectedOrders[i].status === 'completed') {
+            completedCount += selectedOrders[i].quantity;
+          }
+        }
+        
+        // Số đếm hiện tại của đơn hàng
+        const calculatedCurrentCount = Math.max(0, totalCountFromDevice - completedCount);
+        const newCurrentCount = Math.min(calculatedCurrentCount, currentOrder.quantity);
+        
+        // Chỉ cập nhật nếu số mới lớn hơn
+        if (newCurrentCount >= (currentOrder.currentCount || 0)) {
+          const oldCount = currentOrder.currentCount || 0;
+          currentOrder.currentCount = newCurrentCount;
+          countingState.totalCounted = totalCountFromDevice;
+          
+          console.log(`⚡ Real-time: Đơn ${currentOrderIndex + 1} (${currentOrder.customerName}): ${oldCount} → ${newCurrentCount}/${currentOrder.quantity}`);
+          
+          // ⚡ REAL-TIME UI UPDATE - không save to ESP32
+          updateOrderTable();
+          updateOverview();
+          
+          // Kiểm tra hoàn thành đơn hàng
+          if (currentOrder.currentCount >= currentOrder.quantity) {
+            currentOrder.currentCount = currentOrder.quantity;
+            currentOrder.status = 'completed';
+            
+            console.log(`✅ Hoàn thành đơn ${currentOrderIndex + 1}: ${currentOrder.customerName}`);
+            
+            // Tìm đơn hàng tiếp theo
+            const nextOrderIndex = selectedOrders.findIndex((o, idx) => 
+              idx > currentOrderIndex && o.status === 'waiting'
+            );
+            
+            if (nextOrderIndex >= 0) {
+              selectedOrders[nextOrderIndex].status = 'counting';
+              countingState.currentOrderIndex = nextOrderIndex;
+              console.log(`▶️ Chuyển sang đơn ${nextOrderIndex + 1}: ${selectedOrders[nextOrderIndex].customerName}`);
+            } else {
+              console.log('🎉 Hoàn thành tất cả đơn hàng trong batch!');
+              countingState.isActive = false;
+            }
+            
+            // Chỉ save khi có thay đổi status quan trọng
+            saveOrderBatches();
+            setTimeout(() => updateOrderTable(), 100); // Defer UI update
+          }
+        }
+      }
+    } else {
+      console.log('⚠️ Received count update but no active batch or not counting');
+    }
   }
 }
 
@@ -866,7 +920,6 @@ function updateSensorStatus(data) {
 }
 
 function updateHeartbeat(data) {
-  console.log('Device heartbeat:', data);
   // Update device online status
   const onlineIndicator = document.getElementById('deviceOnline');
   if (onlineIndicator) {
@@ -877,41 +930,92 @@ function updateHeartbeat(data) {
 
 // Handle IR Command Messages from MQTT  
 async function handleIRCommandMessage(data) {
-  console.log('🎛️ IR Remote command from MQTT:', data);
+  console.log('🎛️ IR Command received:', data);
   
-  // Force refresh status để sync với ESP32
-  setTimeout(async () => {
-    console.log('🔄 Refreshing data after IR command...');
-    await loadOrderBatchesFromESP32();
-    await loadSettingsFromESP32();
-    updateUI();
-    updateOverview();
-  }, 200);
+  // Xử lý MQTT_READY signal từ ESP32
+  if (data.action === 'MQTT_READY') {
+    return;
+  }
+  
+  // Xử lý IR command từ ESP32 - simulate user click
+  switch(data.action) {
+    case 'START':
+      console.log('🎛️ IR Remote START - executing startCounting()');
+      await startCounting();
+      break;
+    case 'PAUSE':
+      console.log('🎛️ IR Remote PAUSE - executing pauseCounting()');  
+      await pauseCounting();
+      break;
+    case 'RESET':
+      console.log('🎛️ IR Remote RESET - executing resetCounting()');
+      await resetCounting();
+      break;
+    default:
+      console.log('🎛️ Unknown IR command:', data.action);
+      break;
+  }
   
   // Show notification về IR command
   const actionText = {
     'START': 'Bắt đầu đếm',
-    'PAUSE': 'Tạm dừng',
+    'PAUSE': 'Tạm dừng', 
     'RESET': 'Reset hệ thống'
   };
   
   showNotification(`🎛️ Remote: ${actionText[data.action] || data.action}`, 'info');
+}
+
+// UI UPDATE FUNCTIONS FOR IR COMMANDS (NO ESP32 COMMANDS)
+function updateUIForStart() {
+  // Update button states
+  document.getElementById('startBtn').disabled = true;
+  document.getElementById('pauseBtn').disabled = false;
+  document.getElementById('resetBtn').disabled = false;
   
-  // Log for debugging
-  console.log(`IR Remote ${data.action} processed - status: ${data.status}, count: ${data.count}`);
+  // Update counting state
+  countingState.isActive = true;
+  
+  // Visual feedback
+  showNotification('🎛️ Remote: Bắt đầu đếm', 'success');
+}
+
+function updateUIForPause() {
+  // Update button states  
+  document.getElementById('startBtn').disabled = false;
+  document.getElementById('pauseBtn').disabled = true;
+  document.getElementById('resetBtn').disabled = false;
+  
+  // Update counting state
+  countingState.isActive = false;
+  
+  // Visual feedback
+  showNotification('🎛️ Remote: Tạm dừng', 'warning');
+}
+
+function updateUIForReset() {
+  // Update button states
+  document.getElementById('startBtn').disabled = false;
+  document.getElementById('pauseBtn').disabled = true;
+  document.getElementById('resetBtn').disabled = true;
+  
+  // Reset counting state
+  countingState.isActive = false;
+  countingState.totalCounted = 0;
+  
+  // Visual feedback
+  showNotification('🎛️ Remote: Reset hệ thống', 'info');
 }
 
 // MQTT Command Functions
 function sendMQTTCommand(topic, payload) {
   if (!mqttClient || !mqttConnected) {
-    console.log('MQTT not connected, command not sent');
     return false;
   }
   
   try {
     const message = JSON.stringify(payload);
     mqttClient.publish(topic, message);
-    console.log(`MQTT Command sent: ${topic}`, payload);
     return true;
   } catch (error) {
     console.error('Failed to send MQTT command:', error);
@@ -919,25 +1023,21 @@ function sendMQTTCommand(topic, payload) {
   }
 }
 
+// DEPRECATED: MQTT Command Functions - Now using API for Web->ESP32 commands
+// These functions kept for compatibility but not used in main flow
 function startCountingMQTT() {
-  return sendMQTTCommand('bagcounter/cmd/start', {
-    timestamp: Date.now(),
-    source: 'web'
-  });
+  console.log('⚠️ startCountingMQTT is deprecated - using API instead');
+  return false; // Force fallback to API
 }
 
 function pauseCountingMQTT() {
-  return sendMQTTCommand('bagcounter/cmd/pause', {
-    timestamp: Date.now(),
-    source: 'web'
-  });
+  console.log('⚠️ pauseCountingMQTT is deprecated - using API instead');
+  return false; // Force fallback to API
 }
 
 function resetCountingMQTT() {
-  return sendMQTTCommand('bagcounter/cmd/reset', {
-    timestamp: Date.now(),
-    source: 'web'
-  });
+  console.log('⚠️ resetCountingMQTT is deprecated - using API instead');
+  return false; // Force fallback to API
 }
 
 function selectOrderMQTT(orderData) {
@@ -968,6 +1068,20 @@ function startManagementAPIPolling() {
   apiPollingInterval = setInterval(async () => {
     try {
       await loadManagementData();
+      
+      // 🎛️ ALSO CHECK FOR IR COMMANDS từ status API (bổ sung cho MQTT)
+      try {
+        const statusResponse = await fetch('/api/status');
+        if (statusResponse.ok) {
+          const statusData = await statusResponse.json();
+          
+          // Process IR commands trong updateStatusFromDevice
+          await updateStatusFromDevice(statusData);
+        }
+      } catch (irError) {
+        console.error('IR status check error:', irError);
+      }
+      
     } catch (error) {
       console.error('Management API polling error:', error);
     }
@@ -978,26 +1092,30 @@ function startManagementAPIPolling() {
 
 async function loadManagementData() {
   try {
-    // 🔄 Load orders, products, settings - CHỈ KHI CẦN CẬP NHẬT
-    // Không load khi khởi tạo vì đã load từ loadAllDataFromESP32()
+    // 🔄 CHỈ SYNC SETTINGS và PRODUCTS - KHÔNG SYNC ORDERS khi đang counting
     console.log('🔄 Refreshing management data from ESP32...');
     
-    const [ordersResponse, productsResponse, settingsResponse] = await Promise.all([
-      fetch('/api/orders').catch(() => null),
+    const [productsResponse, settingsResponse] = await Promise.all([
       fetch('/api/products').catch(() => null),
       fetch('/api/settings').catch(() => null)
     ]);
     
-    if (ordersResponse?.ok) {
-      const orders = await ordersResponse.json();
-      if (orders && orders.length > 0) {
-        orderBatches = orders;
-        localStorage.setItem('orderBatches', JSON.stringify(orderBatches));
-        updateBatchSelector();
-        updateCurrentBatchSelect();
-        updateBatchDisplay();
-        console.log('Orders refreshed from ESP32');
+    // CHỈ SYNC ORDERS khi KHÔNG đang counting để tránh ghi đè real-time data
+    if (!countingState.isActive) {
+      const ordersResponse = await fetch('/api/orders').catch(() => null);
+      if (ordersResponse?.ok) {
+        const orders = await ordersResponse.json();
+        if (orders && orders.length > 0) {
+          orderBatches = orders;
+          localStorage.setItem('orderBatches', JSON.stringify(orderBatches));
+          updateBatchSelector();
+          updateCurrentBatchSelect();
+          updateBatchDisplay();
+          console.log('📦 Orders refreshed from ESP32 (not counting)');
+        }
       }
+    } else {
+      console.log('⚡ Skipping orders sync - real-time counting active');
     }
     
     if (productsResponse?.ok) {
@@ -1006,7 +1124,7 @@ async function loadManagementData() {
         currentProducts = products;
         localStorage.setItem('products', JSON.stringify(currentProducts));
         updateProductTable();
-        console.log('Products refreshed from ESP32');
+        console.log('🛍️ Products refreshed from ESP32');
       }
     }
     
@@ -1016,7 +1134,7 @@ async function loadManagementData() {
         settings = { ...settings, ...settingsData };
         localStorage.setItem('settings', JSON.stringify(settings));
         updateSettingsForm();
-        console.log('Settings refreshed from ESP32');
+        console.log('⚙️ Settings refreshed from ESP32');
       }
     }
     
@@ -1056,6 +1174,34 @@ function updateStatusIndicators(data) {
   const targetElement = document.getElementById('currentTarget');
   if (targetElement) {
     targetElement.textContent = data.target || 0;
+  }
+  
+  // CẬP NHẬT THÔNG TIN BATCH HIỆN TẠI
+  if (data.currentBatchName) {
+    // Update batch name display
+    const batchNameElement = document.getElementById('currentBatchName');
+    if (batchNameElement) {
+      batchNameElement.textContent = data.currentBatchName;
+    }
+    
+    // Update batch info display  
+    const batchInfoElement = document.getElementById('batchInfoDisplay');
+    if (batchInfoElement) {
+      batchInfoElement.innerHTML = `
+        <strong>📦 ${data.currentBatchName}</strong>
+        ${data.currentBatchDescription ? `<br><small>${data.currentBatchDescription}</small>` : ''}
+        <br><small>Đơn hàng: ${data.totalOrdersInBatch || 0}</small>
+      `;
+      batchInfoElement.style.display = 'block';
+    }
+    
+    console.log('📦 Batch info updated:', data.currentBatchName, '- Orders:', data.totalOrdersInBatch);
+  } else {
+    // Hide batch info if no batch selected
+    const batchInfoElement = document.getElementById('batchInfoDisplay');
+    if (batchInfoElement) {
+      batchInfoElement.style.display = 'none';
+    }
   }
 }
 
@@ -1139,6 +1285,9 @@ function loadBatch() {
       document.getElementById('batchInfo').style.display = 'block';
       document.getElementById('orderFormContainer').style.display = 'block';
       updateBatchPreview();
+      
+      // GỬI THÔNG TIN BATCH LÊN ESP32 KHI CHỌN
+      activateBatchOnESP32(batch);
     }
   }
 }
@@ -1372,6 +1521,9 @@ function switchBatch() {
       
       saveOrderBatches();
       
+      // GỬI THÔNG TIN BATCH LÊN ESP32 KHI CHỌN
+      activateBatchOnESP32(batch);
+      
       console.log('Activated batch:', batch.name, 'with', batch.orders.length, 'orders');
       
       currentPage = 1;
@@ -1415,17 +1567,33 @@ function updateBatchSelector() {
 }
 
 function updateCurrentBatchSelect() {
+  // Cập nhật dropdown trong order tab
   const select = document.getElementById('currentBatchSelect');
-  if (!select) return;
+  if (select) {
+    select.innerHTML = '<option value="">Chọn danh sách</option>';
+    
+    orderBatches.forEach(batch => {
+      const option = document.createElement('option');
+      option.value = batch.id;
+      option.textContent = batch.name;
+      select.appendChild(option);
+    });
+  }
   
-  select.innerHTML = '<option value="">Chọn danh sách</option>';
-  
-  orderBatches.forEach(batch => {
-    const option = document.createElement('option');
-    option.value = batch.id;
-    option.textContent = batch.name;
-    select.appendChild(option);
-  });
+  // CẬP NHẬT DROPDOWN TRONG OVERVIEW TAB
+  const batchSelector = document.getElementById('batchSelector');
+  if (batchSelector) {
+    batchSelector.innerHTML = '<option value="">Chọn danh sách đơn hàng</option>';
+    
+    orderBatches.forEach(batch => {
+      const option = document.createElement('option');
+      option.value = batch.id;
+      option.textContent = batch.name;
+      batchSelector.appendChild(option);
+    });
+    
+    console.log('✅ Updated batchSelector with', orderBatches.length, 'batches');
+  }
 }
 
 function updateBatchDisplay() {
@@ -1578,6 +1746,30 @@ function selectOrder(orderId, checked) {
   if (order) {
     order.selected = checked;
     console.log(`Order ${order.product.name} ${checked ? 'selected' : 'deselected'}`);
+    
+    // 🚀 GỬI THÔNG TIN SẢN PHẨM ĐẾN ESP32 KHI CHỌN
+    if (checked) {
+      console.log('📦 Sending product info to ESP32:', order.product.name, 'Target:', order.plannedQuantity);
+      
+      // Gửi cả set_product và batch_info để đảm bảo ESP32 nhận được
+      sendESP32Command('set_product', {
+        productName: order.product.name,
+        target: order.plannedQuantity
+      }).catch(error => {
+        console.error('Failed to send product to ESP32:', error);
+      });
+      
+      // Gửi batch_info để cập nhật toàn bộ thông tin
+      sendESP32Command('batch_info', {
+        firstOrder: {
+          productName: order.product.name,
+          quantity: order.plannedQuantity
+        }
+      }).catch(error => {
+        console.error('Failed to send batch info to ESP32:', error);
+      });
+    }
+    
     saveOrderBatches();
     updateOverview();
   }
@@ -1788,22 +1980,9 @@ async function startCounting() {
   console.log('Sending batch info to ESP32:', batchInfo);
   
   try {
-    // Try MQTT first
-    if (mqttConnected) {
-      console.log('Sending MQTT start command...');
-      const success = startCountingMQTT();
-      if (!success) {
-        console.log('MQTT start failed, trying API...');
-        await sendESP32Command('start', batchInfo);
-      } else {
-        console.log('MQTT start command sent successfully');
-        // Gửi thông tin batch qua API song song với MQTT
-        await sendESP32Command('batch_info', batchInfo);
-      }
-    } else {
-      console.log('MQTT not connected, using API...');
-      await sendESP32Command('start', batchInfo);
-    }
+    // Web commands always use API to avoid MQTT loops
+    console.log('🌐 Web START command - sending via API...');
+    await sendESP32Command('start', batchInfo);
     
     saveOrderBatches();
     updateOrderTable();
@@ -1822,20 +2001,9 @@ async function pauseCounting() {
   console.log('MQTT connected:', mqttConnected);
   
   try {
-    // Try MQTT first
-    if (mqttConnected) {
-      console.log('Sending MQTT pause command...');
-      const success = pauseCountingMQTT();
-      if (!success) {
-        console.log('MQTT pause failed, trying API...');
-        await sendESP32Command('pause');
-      } else {
-        console.log('MQTT pause command sent successfully');
-      }
-    } else {
-      console.log('MQTT not connected, using API...');
-      await sendESP32Command('pause');
-    }
+    // Web commands always use API to avoid MQTT loops
+    console.log('🌐 Web PAUSE command - sending via API...');
+    await sendESP32Command('pause');
     
     countingState.isActive = false;
     
@@ -1864,7 +2032,8 @@ async function pauseCounting() {
     setTimeout(async () => {
       await loadOrderBatchesFromESP32();
       await loadSettingsFromESP32();
-      updateUI();
+      updateOverview();
+      updateOrderTable();
     }, 500);
     
     console.log('Counting paused successfully');
@@ -1888,20 +2057,9 @@ async function resetCounting() {
   }
   
   try {
-    // Try MQTT first
-    if (mqttConnected) {
-      console.log('Sending MQTT reset command...');
-      const success = resetCountingMQTT();
-      if (!success) {
-        console.log('MQTT reset failed, trying API...');
-        await sendESP32Command('reset');
-      } else {
-        console.log('MQTT reset command sent successfully');
-      }
-    } else {
-      console.log('MQTT not connected, using API...');
-      await sendESP32Command('reset');
-    }
+    // Web commands always use API to avoid MQTT loops
+    console.log('🌐 Web RESET command - sending via API...');
+    await sendESP32Command('reset');
     
     // Reset local state
     countingState.isActive = false;
@@ -2589,7 +2747,7 @@ async function sendOrderBatchesToESP32() {
     if (response.ok) {
       const result = await response.json();
       console.log('✅ Order batches sent to ESP32 successfully:', result);
-      showNotification(`Đã lưu ${orderBatches.length} lô đơn hàng lên ESP32`, 'success');
+      //showNotification(`Đã lưu ${orderBatches.length} lô đơn hàng lên ESP32`, 'success');
     } else {
       const errorText = await response.text();
       throw new Error(`HTTP error! status: ${response.status}, response: ${errorText}`);
@@ -2718,6 +2876,40 @@ function updateConveyorNameDisplay() {
   }
 }
 
+// Load order batches from ESP32 
+async function loadOrderBatchesFromESP32() {
+  try {
+    console.log('📋 Loading order batches from ESP32...');
+    const response = await fetch('/api/batches');
+    
+    if (response.ok) {
+      const esp32Batches = await response.json();
+      console.log('📡 ESP32 batches received:', esp32Batches);
+      
+      if (esp32Batches && Array.isArray(esp32Batches) && esp32Batches.length > 0) {
+        // Cập nhật orderBatches từ ESP32
+        orderBatches = esp32Batches;
+        console.log('✅ Updated orderBatches from ESP32:', orderBatches.length, 'batches');
+        
+        // Cập nhật UI
+        updateCurrentBatchSelect();
+        updateBatchSelector();
+        
+        return esp32Batches;
+      } else {
+        console.log('📋 ESP32 has no batches - using localStorage');
+        return [];
+      }
+    } else {
+      console.warn('Failed to load order batches from ESP32:', response.status);
+      return [];
+    }
+  } catch (error) {
+    console.error('Error loading order batches from ESP32:', error);
+    return [];
+  }
+}
+
 // ESP32 Communication (Updated)
 async function sendCommand(command, value = null) {
   try {
@@ -2747,7 +2939,10 @@ async function sendESP32Command(action, data = {}) {
       ...data
     };
     
-    console.log(`🚀 Sending ESP32 command: ${action}`, payload);
+    // Chỉ log cho button commands quan trọng
+    if (['start', 'pause', 'reset'].includes(action)) {
+      console.log(`� Web→ESP32: ${action.toUpperCase()}`);
+    }
     
     const response = await fetch('/api/cmd', {
       method: 'POST',
@@ -2762,11 +2957,8 @@ async function sendESP32Command(action, data = {}) {
     }
     
     const result = await response.text();
-    console.log(`ESP32 Command ${action} sent successfully:`, result);
     
-    // Đợi 200ms để ESP32 xử lý command trước khi tiếp tục
     if (action === 'next_order') {
-      console.log('⏱️ Waiting for ESP32 to process next_order...');
       await new Promise(resolve => setTimeout(resolve, 200));
     }
     
@@ -2885,6 +3077,62 @@ async function sendOrderToESP32(order) {
   }
 }
 
+// GỬI THÔNG TIN BATCH ĐẾN ESP32 KHI ACTIVATE/CHỌN BATCH
+async function activateBatchOnESP32(batch) {
+  try {
+    console.log('🔄 Activating batch on ESP32:', batch.name);
+    
+    // Tính tổng kế hoạch của tất cả đơn hàng trong batch
+    const batchTotalTarget = batch.orders.reduce((total, order) => {
+      return total + (order.quantity || 0);
+    }, 0);
+    
+    console.log('📊 Batch total target:', batchTotalTarget, 'from', batch.orders.length, 'orders');
+    
+    // Gửi thông tin batch
+    const batchPayload = {
+      batchName: batch.name,
+      batchId: batch.id,
+      batchDescription: batch.description || '',
+      totalOrders: batch.orders.length,
+      batchTotalTarget: batchTotalTarget  // Thêm tổng target
+    };
+    
+    console.log('Sending batch info to ESP32:', batchPayload);
+    
+    const response = await fetch('/api/activate_batch', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(batchPayload)
+    });
+    
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error('ESP32 batch activation error:', errorText);
+      throw new Error(`HTTP error! status: ${response.status}`);
+    }
+    
+    const result = await response.json();
+    console.log('✅ Batch activated on ESP32:', result);
+    
+    // Nếu batch có đơn hàng, gửi đơn hàng đầu tiên để hiển thị
+    if (batch.orders.length > 0) {
+      console.log('Sending first order for display:', batch.orders[0].product.name);
+      await sendOrderToESP32(batch.orders[0]);
+    }
+    
+    showNotification(`Đã chọn danh sách: ${batch.name}`, 'success');
+    return true;
+    
+  } catch (error) {
+    console.error('Error activating batch on ESP32:', error);
+    showNotification('Lỗi kích hoạt danh sách: ' + error.message, 'error');
+    return false;
+  }
+}
+
 // Gửi sản phẩm đến ESP32
 async function sendProductToESP32(product) {
   try {
@@ -2965,7 +3213,23 @@ async function getStatus() {
 async function updateStatusFromDevice(data) {
   if (!data) return;
   
-  console.log('🔄 updateStatusFromDevice called with:', data);
+  // 🎛️ Check for IR commands in status when MQTT might not work
+  if (data.lastIRCommand && data.lastIRTimestamp) {
+    // Check if this is a new IR command (different timestamp)
+    if (!window.lastProcessedIRTimestamp || data.lastIRTimestamp !== window.lastProcessedIRTimestamp) {
+      console.log('🎛️ ESP32→Web: IR ' + data.lastIRCommand + ' (polling)');
+      window.lastProcessedIRTimestamp = data.lastIRTimestamp;
+      
+      // Process IR command like MQTT
+      await handleIRCommandMessage({
+        source: "IR_REMOTE",
+        action: data.lastIRCommand,
+        status: data.status,
+        count: data.count,
+        timestamp: data.lastIRTimestamp
+      });
+    }
+  }
   
   // Update current count if device has new count
   if (data.count !== undefined) {
@@ -4824,3 +5088,206 @@ function clearBatchHistory() {
     location.reload(); // Refresh page để đóng modal
   }
 }
+
+// Test function to send product info to ESP32
+function testSetProduct() {
+  const testProducts = [
+    { name: "Gạo ST25", target: 25 },
+    { name: "Đậu xanh", target: 30 },
+    { name: "Nếp cẩm", target: 20 },
+    { name: "Cà phê rang", target: 15 }
+  ];
+  
+  const randomProduct = testProducts[Math.floor(Math.random() * testProducts.length)];
+  
+  console.log('🧪 Testing set_product with:', randomProduct.name);
+  
+  // Send both set_product and batch_info
+  sendESP32Command('set_product', {
+    productName: randomProduct.name,
+    target: randomProduct.target
+  }).then(() => {
+    console.log('✅ Test set_product sent successfully');
+    
+    // Also send batch_info
+    return sendESP32Command('batch_info', {
+      firstOrder: {
+        productName: randomProduct.name,
+        quantity: randomProduct.target
+      }
+    });
+  }).then(() => {
+    console.log('✅ Test batch_info sent successfully');
+    alert(`Test completed! Sent "${randomProduct.name}" with target ${randomProduct.target} to ESP32. Check ESP32 Serial Monitor.`);
+  }).catch(error => {
+    console.error('❌ Test failed:', error);
+    alert('Test failed: ' + error.message);
+  });
+}
+
+// Test functions for debugging
+window.testConnectivity = function() {
+  console.log('� Testing ESP32 connectivity...');
+  
+  // Test 1: Basic fetch to root
+  console.log('1. Testing root path /...');
+  fetch('/')
+    .then(response => {
+      console.log(`📊 Root response: ${response.status} ${response.statusText}`);
+      return fetch('/api/status');
+    })
+    .then(response => {
+      console.log(`📊 /api/status response: ${response.status} ${response.statusText}`);
+      return response.json();
+    })
+    .then(data => {
+      console.log('✅ /api/status success:', data);
+      
+      console.log('2. Testing /api/cmd with test command...');
+      return sendESP32Command('test', { debug: true });
+    })
+    .then(result => {
+      console.log('✅ /api/cmd test result:', result);
+      console.log('✅ Full connectivity test PASSED!');
+    })
+    .catch(error => {
+      console.error('❌ Connectivity test FAILED:', error);
+      console.log('💡 Possible issues:');
+      console.log('   - Wrong IP address');
+      console.log('   - ESP32 not connected to WiFi');
+      console.log('   - Firewall blocking connection');
+      console.log('   - ESP32 web server not running');
+    });
+};
+
+window.testMQTTCount = function() {
+  console.log('🧪 Testing MQTT count updates...');
+  
+  // Test 1: Check MQTT connection
+  console.log('1. MQTT Connection Status:');
+  console.log('   Connected:', mqttConnected);
+  console.log('   Client exists:', !!mqttClient);
+  console.log('   Last MQTT update:', lastMqttUpdate ? new Date(lastMqttUpdate) : 'Never');
+  
+  // Test 2: Manual count update simulation
+  console.log('2. Testing manual count update...');
+  const testCountData = {
+    deviceId: "BT-001",
+    count: Math.floor(Math.random() * 50) + 1,
+    target: 100,
+    type: "Test Product",
+    timestamp: new Date().toISOString(),
+    progress: 0
+  };
+  
+  console.log('📊 Simulating count data:', testCountData);
+  
+  // Test direct display update
+  updateDisplayElements(testCountData);
+  
+  // Test MQTT handler
+  handleCountUpdate(testCountData);
+  
+  console.log('✅ Manual test completed. Check "Thực hiện" field should show:', testCountData.count);
+  console.log('🎯 If this works but real MQTT doesn\'t, problem is in MQTT communication');
+};
+
+window.debugMQTTTopics = function() {
+  console.log('🔍 MQTT Topics Debug:');
+  console.log('Subscribed topics should include:');
+  console.log('   - bagcounter/status');
+  console.log('   - bagcounter/count');  
+  console.log('   - bagcounter/ir_command');
+  console.log('   - bagcounter/alerts');
+  
+  if (mqttClient) {
+    console.log('MQTT Client state:', mqttClient.connected ? 'Connected' : 'Disconnected');
+  } else {
+    console.log('❌ MQTT Client not initialized');
+  }
+};
+
+// Test basic connectivity to ESP32
+window.testConnectivity = function() {
+  console.log('🔌 Testing ESP32 connectivity...');
+  
+  console.log('1. Testing /api/status...');
+  fetch('/api/status')
+    .then(response => {
+      console.log(`📊 /api/status response: ${response.status} ${response.statusText}`);
+      return response.json();
+    })
+    .then(data => {
+      console.log('✅ /api/status success:', data);
+      
+      console.log('2. Testing /api/cmd with ping...');
+      return sendESP32Command('ping', { test: true });
+    })
+    .then(() => {
+      console.log('✅ Full connectivity test passed!');
+    })
+    .catch(error => {
+      console.error('❌ Connectivity test failed:', error);
+      console.log('💡 Check if ESP32 IP is correct and reachable');
+    });
+};
+
+window.testWebCommands = function() {
+  console.log('🧪 Testing web commands step by step...');
+  
+  console.log('Step 1: Testing start command...');
+  sendESP32Command('start')
+    .then(result => {
+      console.log('✅ Start command result:', result);
+      console.log('Step 2: Testing pause command...');
+      return sendESP32Command('pause');
+    })
+    .then(result => {
+      console.log('✅ Pause command result:', result);
+      console.log('Step 3: Testing reset command...');
+      return sendESP32Command('reset');
+    })
+    .then(result => {
+      console.log('✅ Reset command result:', result);
+      console.log('✅ All web commands test PASSED!');
+      console.log('🎯 Check ESP32 Serial Monitor for corresponding logs:');
+      console.log('   📨 Received API command: start');
+      console.log('   📨 Received API command: pause');  
+      console.log('   📨 Received API command: reset');
+    })
+    .catch(error => {
+      console.error('❌ Web commands test FAILED:', error);
+    });
+};
+
+window.debugMQTTConnection = function() {
+  console.log('🔍 MQTT Connection Debug:');
+  console.log('   Connected:', mqttConnected);
+  console.log('   Client exists:', !!mqttClient);
+  console.log('   Client connected:', mqttClient ? mqttClient.connected : 'N/A');
+  console.log('   Last MQTT update:', lastMqttUpdate ? new Date(lastMqttUpdate) : 'Never');
+  
+  if (mqttClient) {
+    console.log('   Client details:', {
+      clientId: mqttClient.options ? mqttClient.options.clientId : 'N/A',
+      host: mqttClient.options ? mqttClient.options.hostname : 'N/A',
+      port: mqttClient.options ? mqttClient.options.port : 'N/A'
+    });
+    
+    console.log('🧪 Testing manual IR command simulation...');
+    const testIRData = {
+      source: "IR_REMOTE",
+      action: "START",
+      status: "RUNNING", 
+      count: 0,
+      timestamp: Date.now(),
+      startTime: "Test Time"
+    };
+    
+    console.log('📊 Simulating IR command:', testIRData);
+    handleMQTTMessage('bagcounter/ir_command', testIRData);
+    console.log('✅ Manual IR command test completed');
+  } else {
+    console.log('❌ MQTT Client not initialized');
+  }
+};

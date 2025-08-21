@@ -63,6 +63,11 @@
               </button>
             </div>
             
+            <!-- Current Batch Info Display -->
+            <div class="batch-info-display" id="batchInfoDisplay" style="display: none; margin: 10px 0; padding: 10px; background: #f0f8ff; border-left: 4px solid #007bff; border-radius: 4px;">
+              <!-- Dynamic content will be filled by JavaScript -->
+            </div>
+
             <!-- Control Buttons -->
             <div class="control-buttons">
               <button class="control-btn input-btn" onclick="setMode('input')">
@@ -72,6 +77,11 @@
               <button class="control-btn output-btn active" onclick="setMode('output')">
                 <i class="fas fa-sign-out-alt"></i>
                 XUẤT
+              </button>
+              <!-- Test Product Button -->
+              <button class="control-btn" onclick="testSetProduct()" style="background: #ff6b35; margin-left: 10px;">
+                <i class="fas fa-test-tube"></i>
+                TEST SẢN PHẨM
               </button>
             </div>
 
