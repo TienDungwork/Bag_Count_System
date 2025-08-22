@@ -90,6 +90,8 @@ const char* TOPIC_CMD_START = "bagcounter/cmd/start";     // Lệnh start
 const char* TOPIC_CMD_PAUSE = "bagcounter/cmd/pause";     // Lệnh pause  
 const char* TOPIC_CMD_RESET = "bagcounter/cmd/reset";     // Lệnh reset
 const char* TOPIC_CMD_SELECT = "bagcounter/cmd/select";   // Chọn đơn hàng
+const char* TOPIC_CMD_BATCH = "bagcounter/cmd/batch_info"; // Thông tin batch
+const char* TOPIC_CMD_TARGET = "bagcounter/cmd/target";   // Cập nhật target
 const char* TOPIC_CONFIG = "bagcounter/config/update";    // Cập nhật config
 
 // MQTT timing variables
@@ -269,6 +271,7 @@ void showConnectingDisplay();
 void setSystemConnected();
 void saveBagConfigsToFile();
 void publishStatusMQTT();
+void displayCurrentOrderInfo();
 
 //----------------------------------------IR Remote functions
 // Cấu hình từng loại - Di chuyển lên đây để sử dụng trong handleIRCommand
@@ -368,6 +371,7 @@ void handleIRCommand(int button) {
       mqtt.subscribe(TOPIC_CMD_PAUSE);
       mqtt.subscribe(TOPIC_CMD_RESET);
       mqtt.subscribe(TOPIC_CMD_SELECT);
+      mqtt.subscribe(TOPIC_CMD_BATCH);
       mqtt.subscribe(TOPIC_CONFIG);
     } else {
       Serial.println("❌ Failed to reconnect MQTT for IR command");
@@ -1298,6 +1302,7 @@ void setupMQTT() {
     mqtt.subscribe(TOPIC_CMD_PAUSE);
     mqtt.subscribe(TOPIC_CMD_RESET);
     mqtt.subscribe(TOPIC_CMD_SELECT);
+    mqtt.subscribe(TOPIC_CMD_BATCH);
     mqtt.subscribe(TOPIC_CONFIG);
     
     publishHeartbeat();
@@ -1568,6 +1573,31 @@ void onMqttMessage(char* topic, byte* payload, unsigned int length) {
         Serial.println("Limit reset via MQTT - continuing count");
         needUpdate = true;
       }
+    }
+    
+  } else if (topicStr == TOPIC_CMD_BATCH) {
+    Serial.println("MQTT Command: BATCH INFO");
+    // Parse JSON batch information
+    DynamicJsonDocument doc(1024);
+    if (deserializeJson(doc, message) == DeserializationError::Ok) {
+      if (doc.containsKey("totalTarget")) {
+        targetCount = doc["totalTarget"];
+        Serial.println("✅ MQTT: Set batch target: " + String(targetCount));
+      }
+      
+      if (doc.containsKey("firstOrder")) {
+        JsonObject firstOrder = doc["firstOrder"];
+        if (firstOrder.containsKey("productName")) {
+          bagType = firstOrder["productName"].as<String>();
+          Serial.println("✅ MQTT: Set first order product: " + bagType);
+        }
+        if (firstOrder.containsKey("customerName")) {
+          String customerName = firstOrder["customerName"].as<String>();
+          Serial.println("✅ MQTT: Customer: " + customerName);
+        }
+      }
+      
+      needUpdate = true;
     }
   }
 }
@@ -2323,6 +2353,11 @@ void setupWebServer() {
         }
       } else if (cmd == "batch_info") {
         // XỬ LÝ THÔNG TIN BATCH TỪ WEB
+        if (doc.containsKey("batchTotalTarget")) {
+          batchTotalTarget = doc["batchTotalTarget"].as<int>();
+          Serial.println("📊 Batch Total Target set to: " + String(batchTotalTarget));
+        }
+        
         if (doc.containsKey("firstOrder")) {
           JsonObject firstOrder = doc["firstOrder"];
           String productName = firstOrder["productName"];
@@ -2332,7 +2367,7 @@ void setupWebServer() {
             Serial.println("📦 Setting product from batch info: " + productName);
             bagType = productName;
             if (target > 0) {
-              targetCount = target;
+              targetCount = batchTotalTarget; // Hiển thị tổng target của batch
             }
             needUpdate = true;
             updateDisplay();
@@ -3231,6 +3266,7 @@ void setupWebServer() {
     subscribe_topics.add(TOPIC_CMD_PAUSE);
     subscribe_topics.add(TOPIC_CMD_RESET);
     subscribe_topics.add(TOPIC_CMD_SELECT);
+    subscribe_topics.add(TOPIC_CMD_BATCH);
     subscribe_topics.add(TOPIC_CONFIG);
     
     String out;
@@ -3791,6 +3827,71 @@ void setupWebServer() {
     }
   });
 
+  // 🚀 API cập nhật target khi thêm/sửa order trong existing batch
+  server.on("/api/update-target", HTTP_POST, [](){
+    server.sendHeader("Access-Control-Allow-Origin", "*");
+    server.sendHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+    server.sendHeader("Access-Control-Allow-Headers", "Content-Type");
+    
+    if (server.hasArg("plain")) {
+      String body = server.arg("plain");
+      Serial.println("🎯 Received target update: " + body);
+      
+      DynamicJsonDocument doc(2048);
+      DeserializationError error = deserializeJson(doc, body);
+      
+      if (!error) {
+        String batchName = doc["batchName"].as<String>();
+        int newTotalTarget = doc["totalTarget"];
+        
+        // Kiểm tra batch name có khớp không
+        if (batchName == currentBatchName) {
+          // Cập nhật tổng target
+          int oldTarget = batchTotalTarget;
+          batchTotalTarget = newTotalTarget;
+          
+          Serial.println("🎯 Target updated from " + String(oldTarget) + " to " + String(newTotalTarget));
+          
+          // Cập nhật hiển thị LED matrix
+          displayCurrentOrderInfo();
+          
+          // Lưu thông tin batch
+          saveBatchInfoToFile();
+          
+          // Response thành công
+          DynamicJsonDocument response(512);
+          response["status"] = "OK";
+          response["message"] = "Target updated successfully";
+          response["batchName"] = batchName;
+          response["oldTarget"] = oldTarget;
+          response["newTarget"] = newTotalTarget;
+          
+          String responseStr;
+          serializeJson(response, responseStr);
+          server.send(200, "application/json", responseStr);
+          
+        } else {
+          Serial.println("❌ Batch name mismatch: expected " + currentBatchName + ", got " + batchName);
+          server.send(400, "application/json", "{\"status\":\"Error\",\"message\":\"Batch name mismatch\"}");
+        }
+        
+      } else {
+        Serial.println("❌ JSON parse error: " + String(error.c_str()));
+        server.send(400, "application/json", "{\"status\":\"Error\",\"message\":\"Invalid JSON\"}");
+      }
+    } else {
+      server.send(400, "application/json", "{\"status\":\"Error\",\"message\":\"No data provided\"}");
+    }
+  });
+
+  // Handle CORS preflight for update-target
+  server.on("/api/update-target", HTTP_OPTIONS, [](){
+    server.sendHeader("Access-Control-Allow-Origin", "*");
+    server.sendHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+    server.sendHeader("Access-Control-Allow-Headers", "Content-Type");
+    server.send(200);
+  });
+
   server.begin();
   Serial.println("WebServer started");
   Serial.println("Access web interface at: http://192.168.4.1/");
@@ -3936,6 +4037,13 @@ void updateDisplay() {
   dma_display->print(line2);
   
   needUpdate = false;
+}
+
+//----------------------------------------Display Current Order Info Function
+void displayCurrentOrderInfo() {
+  // Gọi updateDisplay để cập nhật thông tin hiện tại
+  needUpdate = true;
+  updateDisplay();
 }
 
 //----------------------------------------Connecting Display Function
@@ -4663,6 +4771,7 @@ void loop() {
         mqtt.subscribe(TOPIC_CMD_PAUSE);
         mqtt.subscribe(TOPIC_CMD_RESET);
         mqtt.subscribe(TOPIC_CMD_SELECT);
+        mqtt.subscribe(TOPIC_CMD_BATCH);
         mqtt.subscribe(TOPIC_CONFIG);
         publishHeartbeat();
         
@@ -4713,6 +4822,6 @@ void loop() {
   server.handleClient();
   
   // Cập nhật hệ thống với delay tối ưu
-  delay(20);  // Giảm từ 100ms xuống 50ms để cải thiện responsiveness
+  delay(50);  // Giảm từ 100ms xuống 50ms để cải thiện responsiveness
 }
 //<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
