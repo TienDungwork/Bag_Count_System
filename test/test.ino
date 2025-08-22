@@ -163,12 +163,18 @@ bool autoReset;                     // Tự động reset sau khi hoàn thành -
 String conveyorName;                // Tên băng tải - LOADED FROM FILE
 int displayBrightness;              // Độ sáng LED matrix (10-100%) - LOADED FROM FILE
 int sensorDelayMs;                  // Độ trễ cảm biến (ms) - LOADED FROM FILE
+int relayDelayAfterComplete;        // Thời gian relay chạy thêm sau khi hoàn thành (ms) - LOADED FROM FILE
 
 // Timing variables for bag detection
 unsigned long lastBagTime = 0;      // Thời gian bao cuối cùng được phát hiện
 unsigned long bagStartTime = 0;     // Thời gian bắt đầu phát hiện bao hiện tại
 bool isBagDetected = false;         // Đang trong quá trình phát hiện bao
 bool waitingForInterval = false;    // Đang chờ khoảng cách tối thiểu
+
+// Relay control variables
+unsigned long orderCompleteTime = 0;    // Thời gian hoàn thành đơn hàng
+bool isOrderComplete = false;           // Đã hoàn thành đơn hàng
+bool isRelayDelayActive = false;        // Đang trong thời gian delay relay
 
 //----------------------------------------
 #define PANEL_RES_X 64
@@ -222,9 +228,9 @@ bool isCountingEnabled = false;  // Biến kiểm soát việc đếm
 bool isTriggerEnabled = false;   // Biến kiểm soát cảm biến khởi động
 bool isCounting = false;    // Biến mới để theo dõi trạng thái đếm
 
-// Biến trạng thái cho LED/Relay
-bool startLedOn = false;  // true = BẬT (HIGH), false = TẮT (LOW) - Active HIGH logic
-bool doneLedOn = false;   // true = BẬT (HIGH), false = TẮT (LOW) - Active HIGH logic
+// Biến trạng thái cho LED
+bool startLedOn = false;  // true = sáng (LOW), false = tắt (HIGH)
+bool doneLedOn = false;   // true = sáng (LOW), false = tắt (HIGH)
 
 //----------------------------------------System Status variables
 bool systemConnected = false;    // Trạng thái kết nối hoàn tất
@@ -454,6 +460,12 @@ void handleWebCommand(int button) {
       currentSystemStatus = "RESET"; // Set trạng thái RESET
       action = "RESET";
       
+      // ⚡ CLEAR RELAY DELAY STATE
+      isOrderComplete = false;
+      isRelayDelayActive = false;
+      orderCompleteTime = 0;
+      Serial.println("🔌 RELAY DELAY STATE CLEARED (manual reset)");
+      
       for (auto& cfg : bagConfigs) {
         cfg.status = "RESET";
       }
@@ -601,6 +613,7 @@ void saveSettingsToFile() {
   doc["bagDetectionDelay"] = bagDetectionDelay;
   doc["minBagInterval"] = minBagInterval;
   doc["autoReset"] = autoReset;
+  doc["relayDelayAfterComplete"] = relayDelayAfterComplete;
   
   File file = LittleFS.open("/settings.json", "w");
   if (file) {
@@ -659,6 +672,7 @@ void loadSettingsFromFile() {
       bagDetectionDelay = doc["bagDetectionDelay"].as<int>();
       minBagInterval = doc["minBagInterval"].as<int>();
       autoReset = doc["autoReset"].as<bool>();
+      relayDelayAfterComplete = doc["relayDelayAfterComplete"].as<int>();
       
       // Sync debounce delay
       debounceDelay = sensorDelayMs;
@@ -670,6 +684,7 @@ void loadSettingsFromFile() {
       Serial.println("    bagDetectionDelay: " + String(bagDetectionDelay) + "ms");
       Serial.println("    minBagInterval: " + String(minBagInterval) + "ms");
       Serial.println("    autoReset: " + String(autoReset ? "true" : "false"));
+      Serial.println("    relayDelayAfterComplete: " + String(relayDelayAfterComplete) + "ms");
       
       Serial.println("✅ All settings loaded from file successfully");
     } else {
@@ -704,6 +719,7 @@ void createDefaultSettingsFile() {
   doc["bagDetectionDelay"] = 200;
   doc["minBagInterval"] = 100;
   doc["autoReset"] = false;
+  doc["relayDelayAfterComplete"] = 5000;
   
   // Add creation timestamp
   doc["_created"] = "ESP32_Default_Config";
@@ -1508,6 +1524,12 @@ void onMqttMessage(char* topic, byte* payload, unsigned int length) {
         settingsChanged = true;
       }
       
+      if (doc.containsKey("relayDelayAfterComplete")) {
+        ::relayDelayAfterComplete = doc["relayDelayAfterComplete"];
+        Serial.println("✅ MQTT: Applied relayDelayAfterComplete: " + String(::relayDelayAfterComplete) + "ms");
+        settingsChanged = true;
+      }
+      
       if (doc.containsKey("conveyorName")) {
         conveyorName = doc["conveyorName"].as<String>();
         Serial.println("✅ MQTT: Applied conveyorName: " + conveyorName);
@@ -1523,6 +1545,7 @@ void onMqttMessage(char* topic, byte* payload, unsigned int length) {
         settingsDoc["bagDetectionDelay"] = ::bagDetectionDelay;
         settingsDoc["minBagInterval"] = ::minBagInterval;
         settingsDoc["autoReset"] = ::autoReset;
+        settingsDoc["relayDelayAfterComplete"] = ::relayDelayAfterComplete;
         
         File file = LittleFS.open("/settings.json", "w");
         if (file) {
@@ -1792,13 +1815,13 @@ void setupWebServer() {
       }
     }
     
-    Serial.print("API Status returning: ");
-    Serial.print(currentStatus);
-    Serial.print(" (isRunning: ");
-    Serial.print(isRunning);
-    Serial.print(", bagType: ");
-    Serial.print(bagType);
-    Serial.println(")");
+    // // Serial.print("API Status returning: ");
+    // Serial.print(currentStatus);
+    // Serial.print(" (isRunning: ");
+    // Serial.print(isRunning);
+    // Serial.print(", bagType: ");
+    // Serial.print(bagType);
+    // Serial.println(")");
     
     doc["status"] = currentStatus;  // Trả về đúng format cho web
     doc["count"] = totalCount;
@@ -1907,16 +1930,16 @@ void setupWebServer() {
   server.on("/api/orders", HTTP_GET, [](){
     server.sendHeader("Access-Control-Allow-Origin", "*");
     
-    Serial.println("📋 GET /api/orders called");
-    Serial.println("📊 ordersData size: " + String(ordersData.size()) + " items");
+    // Serial.println("📋 GET /api/orders called");
+    // Serial.println("📊 ordersData size: " + String(ordersData.size()) + " items");
     
     // Trả về orders data từ LittleFS
     String out;
     serializeJson(ordersData, out);
     
-    Serial.println("📤 Sending orders data (size: " + String(out.length()) + " chars)");
+    // Serial.println("📤 Sending orders data (size: " + String(out.length()) + " chars)");
     if (out.length() > 0 && out.length() < 300) {
-      Serial.println("📄 Orders content: " + out);
+      // Serial.println("📄 Orders content: " + out);
     } else if (out.length() >= 300) {
       Serial.println("📄 Orders content preview: " + out.substring(0, 200) + "...");
     } else {
@@ -2044,6 +2067,12 @@ void setupWebServer() {
         totalCount = 0;
         isLimitReached = false;
         history.clear();
+        
+        // ⚡ CLEAR RELAY DELAY STATE (khi reset count)
+        isOrderComplete = false;
+        isRelayDelayActive = false;
+        orderCompleteTime = 0;
+        Serial.println("🔌 RELAY DELAY STATE CLEARED (count reset)");
         
         // GIỮ NGUYÊN TRẠNG THÁI isRunning, isTriggerEnabled
         // CHỈ CẬP NHẬT COUNT DISPLAY
@@ -2712,6 +2741,7 @@ void setupWebServer() {
     doc["minBagInterval"] = minBagInterval;
     doc["autoReset"] = autoReset;
     doc["brightness"] = displayBrightness;
+    doc["relayDelayAfterComplete"] = relayDelayAfterComplete;
     
     // Add debug info about settings source
     doc["_debug"] = LittleFS.exists("/settings.json") ? "file" : "defaults";
@@ -2770,6 +2800,12 @@ void setupWebServer() {
         bool oldValue = ::autoReset;
         ::autoReset = doc["autoReset"]; // Sử dụng :: để chỉ biến global
         Serial.println("  ⚡ autoReset: " + String(oldValue ? "true" : "false") + " → " + String(::autoReset ? "true" : "false"));
+      }
+      
+      if (doc.containsKey("relayDelayAfterComplete")) {
+        int oldValue = ::relayDelayAfterComplete;
+        ::relayDelayAfterComplete = doc["relayDelayAfterComplete"];
+        Serial.println("  ⚡ relayDelayAfterComplete: " + String(oldValue) + "ms → " + String(::relayDelayAfterComplete) + "ms");
       }
       
       // Cấu hình IP tĩnh Ethernet
@@ -4007,6 +4043,12 @@ void updateCount() {
       // MQTT: Publish completion alert
       publishAlert("COMPLETED", "Hoàn thành đơn hàng: " + bagType + " - " + String(totalCount) + " bao");
       
+      // ⚡ BẮT ĐẦU RELAY DELAY TIMER
+      isOrderComplete = true;
+      orderCompleteTime = millis();
+      isRelayDelayActive = true;
+      Serial.println("🔌 ORDER COMPLETED - Starting relay delay: " + String(relayDelayAfterComplete) + "ms");
+      
       // MQTT: Publish final status
       publishStatusMQTT();
       
@@ -4027,6 +4069,12 @@ void updateCount() {
         startTimeStr = "";
         timeWaitingForSync = false;
         currentSystemStatus = "RESET";
+        
+        // ⚡ CLEAR RELAY DELAY STATE
+        isOrderComplete = false;
+        isRelayDelayActive = false;
+        orderCompleteTime = 0;
+        Serial.println("🔌 RELAY DELAY STATE CLEARED");
         
         //  CHỈ RESET ĐƠN HÀNG HIỆN TẠI trong bagConfigs
         for (auto& cfg : bagConfigs) {
@@ -4112,13 +4160,29 @@ void updateDoneLED() {
 }
 
 void updateStartLED() {
-  // Relay START_LED_PIN (GPIO 38) với logic Active HIGH
-  if (isRunning) {
-    startLedOn = true;  // BẬT (HIGH)  
+  // Đèn START (GPIO 38 - relay) logic cập nhật:
+  // - Sáng (LOW) khi: isRunning = true HOẶC đang trong thời gian relay delay
+  // - Tắt (HIGH) khi: isRunning = false VÀ không trong thời gian relay delay
+  
+  if (isRunning || isRelayDelayActive) {
+    startLedOn = true;  // Sáng (LOW) - relay hoạt động
   } else {
-    startLedOn = false; // TẮT (LOW)
+    startLedOn = false; // Tắt (HIGH) - relay ngưng
   }
-  digitalWrite(START_LED_PIN, startLedOn ? HIGH : LOW);  // Logic ngược lại: HIGH = BẬT
+  
+  digitalWrite(START_LED_PIN, startLedOn ? HIGH : LOW);
+  
+  // Debug relay state
+  static bool lastRelayState = false;
+  if (startLedOn != lastRelayState) {
+    lastRelayState = startLedOn;
+    String reason = "";
+    if (isRunning) reason = "System Running";
+    else if (isRelayDelayActive) reason = "Relay Delay Active";
+    else reason = "System Stopped";
+    
+    Serial.println("🔌 RELAY STATE: " + String(startLedOn ? "ON" : "OFF") + " - Reason: " + reason);
+  }
 }
 
 //----------------------------------------SETUP & LOOP
@@ -4181,8 +4245,8 @@ void setup() {
   Serial.println("✅ IR Remote initialized");
   
   // Tắt LED ban đầu
-  digitalWrite(START_LED_PIN, LOW);   // Relay TẮT (LOW) - Active HIGH logic
-  digitalWrite(DONE_LED_PIN, LOW);    // Đèn DONE TẮT (LOW) - Active HIGH logic
+  digitalWrite(START_LED_PIN, LOW);  // Đèn START tắt (HIGH)
+  digitalWrite(DONE_LED_PIN, LOW);   // Đèn DONE tắt (HIGH)
   
   // BƯỚC 4: Khởi tạo các biến trạng thái
   isRunning = false;
@@ -4378,6 +4442,17 @@ void loop() {
   if (millis() - lastForceUpdate > 5000) { // Force update mỗi 5 giây
     needUpdate = true;
     lastForceUpdate = millis();
+  }
+  
+  // 🔌 RELAY DELAY TIMER - Kiểm tra và tắt relay sau khi hoàn thành đơn hàng
+  if (isRelayDelayActive && isOrderComplete) {
+    if (millis() - orderCompleteTime >= relayDelayAfterComplete) {
+      // Hết thời gian delay, tắt relay
+      isRelayDelayActive = false;
+      isOrderComplete = false;
+      Serial.println("🔌 RELAY DELAY FINISHED - Relay can now be turned OFF");
+      // Relay sẽ được tắt trong updateStartLED() khi không còn đơn hàng nào chạy
+    }
   }
   
   // Xử lý IR Remote

@@ -78,11 +78,6 @@
                 <i class="fas fa-sign-out-alt"></i>
                 XUẤT
               </button>
-              <!-- Test Product Button -->
-              <button class="control-btn" onclick="testSetProduct()" style="background: #ff6b35; margin-left: 10px;">
-                <i class="fas fa-test-tube"></i>
-                TEST SẢN PHẨM
-              </button>
             </div>
 
             <!-- Time Info -->
@@ -160,6 +155,7 @@
                     <th>Khách hàng</th>
                     <th>Xe</th>
                     <th>Trạng thái</th>
+                    <th>Thao tác</th>
                   </tr>
                 </thead>
                 <tbody id="orderTableBody">
@@ -278,29 +274,46 @@
                 <input type="text" id="vehicleNumber" required>
               </div>
               
-              <div class="form-group">
-                <label for="productSelect">Tên mặt hàng:</label>
-                <select id="productSelect" required>
-                  <option value="">Chọn sản phẩm</option>
-                  <!-- Dynamic options -->
-                </select>
-              </div>
-              
-              <div class="form-group">
-                <label for="quantity">Số lượng:</label>
-                <input type="number" id="quantity" min="1" required>
-              </div>
-              
-              <div class="form-group">
-                <label for="warningQuantity">Cảnh báo gần xong:</label>
-                <input type="number" id="warningQuantity" min="1">
+              <!-- Multiple Products Section -->
+              <div class="products-section">
+                <h5><i class="fas fa-boxes"></i> Danh sách sản phẩm</h5>
+                <div id="productsList">
+                  <div class="product-item" data-index="0">
+                    <div class="form-row">
+                      <div class="form-group">
+                        <label>Tên mặt hàng:</label>
+                        <select class="productSelect" required>
+                          <option value="">Chọn sản phẩm</option>
+                          <!-- Dynamic options -->
+                        </select>
+                      </div>
+                      <div class="form-group">
+                        <label>Số lượng:</label>
+                        <input type="number" class="quantity" min="1" required>
+                      </div>
+                      <div class="form-group">
+                        <label>Cảnh báo gần xong:</label>
+                        <input type="number" class="warningQuantity" min="1">
+                      </div>
+                      <div class="form-group">
+                        <button type="button" class="btn-danger btn-small" onclick="removeProductItem(0)" style="margin-top: 25px;">
+                          <i class="fas fa-trash"></i>
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+                
+                <button type="button" class="btn-secondary" onclick="addProductItem()">
+                  <i class="fas fa-plus"></i> Thêm sản phẩm khác
+                </button>
               </div>
               
               <div class="form-actions">
-                <button type="button" class="btn-primary" onclick="addOrderToBatch()">
-                  <i class="fas fa-plus"></i> Thêm vào danh sách
+                <button type="button" class="btn-primary" onclick="addMultipleOrdersToBatch()">
+                  <i class="fas fa-plus"></i> Thêm tất cả vào danh sách
                 </button>
-                <button type="reset" class="btn-secondary">
+                <button type="reset" class="btn-secondary" onclick="resetOrderForm()">
                   <i class="fas fa-undo"></i> Làm mới form
                 </button>
               </div>
@@ -553,30 +566,97 @@
                 <span id="brightnessValue">35%</span>
               </div>
             </div>
+
+            <div class="setting-group">
+              <h4><i class="fas fa-bolt"></i> Cài đặt Relay</h4>
+              <div class="form-group">
+                <label for="relayDelay">Thời gian chạy thêm relay sau khi đếm xong (giây):</label>
+                <input type="number" id="relayDelay" min="0" max="60" value="5" step="1">
+                <small>Relay sẽ tiếp tục chạy thêm thời gian này sau khi hoàn thành đơn hàng</small>
+              </div>
+            </div>
             
             <button class="btn-success" onclick="saveSettings()">
               <i class="fas fa-save"></i> Lưu cài đặt
             </button>
-            <button class="btn-info" onclick="checkESP32Data()" style="margin-left: 10px;">
-              <i class="fas fa-info-circle"></i> Kiểm tra dữ liệu ESP32
-            </button>
-            <button class="btn-info" onclick="debugESP32Settings()" style="margin-left: 10px;">
-              <i class="fas fa-bug"></i> Debug Settings
-            </button>
-            <button class="btn-info" onclick="compareSettings()" style="margin-left: 10px;">
-              <i class="fas fa-balance-scale"></i> So sánh Settings
-            </button>
-            <button class="btn-warning" onclick="forceRefreshFromESP32()" style="margin-left: 10px;">
-              <i class="fas fa-sync-alt"></i> Tải lại từ ESP32
-            </button>
-            <button class="btn-warning" onclick="sendOrderBatchesToESP32()" style="margin-left: 10px;">
-              <i class="fas fa-upload"></i> Force sync Orders
-            </button>
-            <button class="btn-danger" onclick="resetAllDataToDefault()" style="margin-left: 10px;">
-              <i class="fas fa-trash-alt"></i> Reset tất cả
-            </button>
           </div>
         </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Edit Order Modal -->
+  <div id="editOrderModal" class="modal" style="display: none;">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h3><i class="fas fa-edit"></i> Sửa đơn hàng</h3>
+        <span class="close" onclick="closeEditOrderModal()">&times;</span>
+      </div>
+      <div class="modal-body">
+        <form id="editOrderForm">
+          <input type="hidden" id="editOrderIndex">
+          <div class="form-group">
+            <label for="editCustomerName">Khách hàng:</label>
+            <input type="text" id="editCustomerName" required>
+          </div>
+          <div class="form-group">
+            <label for="editOrderCode">Mã đơn hàng:</label>
+            <input type="text" id="editOrderCode" required>
+          </div>
+          <div class="form-group">
+            <label for="editVehicleNumber">Biển số xe:</label>
+            <input type="text" id="editVehicleNumber" required>
+          </div>
+          <div class="form-group">
+            <label for="editProductSelect">Sản phẩm:</label>
+            <select id="editProductSelect" required>
+              <option value="">Chọn sản phẩm</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label for="editQuantity">Số lượng:</label>
+            <input type="number" id="editQuantity" min="1" required>
+          </div>
+          <div class="form-group">
+            <label for="editWarningQuantity">Cảnh báo gần xong:</label>
+            <input type="number" id="editWarningQuantity" min="1">
+          </div>
+        </form>
+      </div>
+      <div class="modal-footer">
+        <button class="btn-primary" onclick="saveEditOrder()">
+          <i class="fas fa-save"></i> Lưu thay đổi
+        </button>
+        <button class="btn-secondary" onclick="closeEditOrderModal()">
+          <i class="fas fa-times"></i> Hủy
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Password Modal for Protected Tabs -->
+  <div id="passwordModal" class="modal" style="display: none;">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h3><i class="fas fa-lock"></i> Nhập mật khẩu</h3>
+        <span class="close" onclick="closePasswordModal()">&times;</span>
+      </div>
+      <div class="modal-body">
+        <p>Vui lòng nhập mật khẩu để truy cập trang này:</p>
+        <div class="form-group">
+          <input type="password" id="adminPassword" placeholder="Nhập mật khẩu..." autocomplete="off">
+        </div>
+        <div class="password-error" id="passwordError" style="display: none; color: red; margin-top: 10px;">
+          Mật khẩu không đúng!
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn-primary" onclick="verifyPassword()">
+          <i class="fas fa-unlock"></i> Xác nhận
+        </button>
+        <button class="btn-secondary" onclick="closePasswordModal()">
+          <i class="fas fa-times"></i> Hủy
+        </button>
       </div>
     </div>
   </div>
