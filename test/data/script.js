@@ -12,6 +12,11 @@ let countingState = {
   totalCounted: 0
 };
 
+// Simple ID counters instead of timestamps
+let batchIdCounter = 1;
+let orderIdCounter = 1;
+let productIdCounter = 1;
+
 // Pagination
 let currentPage = 1;
 let itemsPerPage = 10;
@@ -83,8 +88,13 @@ document.addEventListener('DOMContentLoaded', async function() {
   // Cập nhật tất cả dropdown sản phẩm sau khi load xong
   updateAllProductSelects();
   
+  // Get device information on startup
+  setTimeout(() => {
+    getDeviceInfo();
+  }, 2000);
+  
   console.log('✅ Application initialized successfully');
-  showNotification('Ứng dụng đã khởi tạo (MQTT Real-time mode)', 'success');
+  // showNotification('Ứng dụng đã khởi tạo (MQTT Real-time mode)', 'success');
 });
 
 // LOAD TẤT CẢ DỮ LIỆU TỪ ESP32 KHI KHỞI ĐỘNG
@@ -122,12 +132,12 @@ async function loadAllDataFromESP32() {
       sendOrderBatchesToESP32();
     }, 1000);
     
-    showNotification('Đã tải dữ liệu từ ESP32', 'success');
+    // showNotification('Đã tải dữ liệu từ ESP32', 'success');
     
   } catch (error) {
     console.error('Error loading data from ESP32:', error);
     console.log('Falling back to localStorage data');
-    showNotification('Không thể tải từ ESP32, sử dụng dữ liệu local', 'warning');
+    showNotification('Không thể tải dữ liệu', 'warning');
   }
 }
 
@@ -257,7 +267,7 @@ async function loadHistoryFromESP32() {
 
 // HÀM ĐỂ FORCE REFRESH TỪ ESP32 (DÙNG KHI CẦN RESET)
 async function forceRefreshFromESP32() {
-  if (confirm('Tải lại tất cả dữ liệu từ ESP32? Dữ liệu local sẽ bị ghi đè.')) {
+  if (confirm('Tải lại tất cả dữ liệu từ thiết bị? Dữ liệu local sẽ bị ghi đè.')) {
     console.log('Force refreshing from ESP32...');
     
     // Clear localStorage
@@ -278,7 +288,7 @@ async function forceRefreshFromESP32() {
     updateHistoryTable();
     updateSettingsForm();
     
-    showNotification('Đã tải lại dữ liệu từ ESP32', 'success');
+    // showNotification('Đã tải lại dữ liệu từ thiết bị', 'success');
   }
 }
 
@@ -337,7 +347,7 @@ async function forceRefreshESP32Settings() {
       // Reload settings to web
       await loadSettingsFromESP32();
       
-      showNotification('Đã force refresh settings từ ESP32', 'success');
+      // showNotification('Đã force refresh settings từ ESP32', 'success');
     } else {
       throw new Error(`HTTP error! status: ${response.status}`);
     }
@@ -762,10 +772,10 @@ async function updateDeviceStatus(data) {
   
   // Sync device status with web counting state
   if (data.status) {
-    console.log('📡 ESP32 Status:', data.status, 'Web state:', countingState.isActive, 'Timestamp:', new Date().toLocaleTimeString());
+    // console.log('📡 ESP32 Status:', data.status, 'Web state:', countingState.isActive, 'Timestamp:', new Date().toLocaleTimeString());
     
     if (data.status === 'RUNNING' && !countingState.isActive) {
-      console.log('🎛️ IR Remote START detected - updating web state');
+      // console.log('🎛️ IR Remote START detected - updating web state');
       countingState.isActive = true;
       
       // Find active batch and set a counting order if none
@@ -788,7 +798,7 @@ async function updateDeviceStatus(data) {
       updateOverview();
       
     } else if (data.status === 'PAUSE') {
-      console.log('🎛️ IR Remote PAUSE detected - updating web state');
+      // console.log('🎛️ IR Remote PAUSE detected - updating web state');
       countingState.isActive = false;
       
       // CHỈ SET PAUSED NẾU CÓ ĐƠN HÀNG ĐANG COUNTING
@@ -811,7 +821,7 @@ async function updateDeviceStatus(data) {
       updateOverview();
       
     } else if (data.status === 'RESET') {
-      console.log('🎛️ IR Remote RESET detected - resetting all orders');
+      // console.log('🎛️ IR Remote RESET detected - resetting all orders');
       
       // Chỉ xử lý nếu chưa reset hoặc đang active
       if (countingState.isActive || countingState.totalCounted > 0) {
@@ -971,17 +981,17 @@ async function handleIRCommandMessage(data) {
   // Xử lý IR command từ ESP32 - simulate user click
   switch(command) {
     case 'START':
-      console.log('🎛️ IR Remote START - executing startCounting()');
+      // console.log('🎛️ IR Remote START - executing startCounting()');
       await startCountingMQTT();
       break;
       
     case 'PAUSE':
-      console.log('🎛️ IR Remote PAUSE - executing pauseCounting()');
+      // console.log('🎛️ IR Remote PAUSE - executing pauseCounting()');
       await pauseCountingMQTT();
       break;
       
     case 'RESET':
-      console.log('🎛️ IR Remote RESET - executing resetCounting()');
+      // console.log('🎛️ IR Remote RESET - executing resetCounting()');
       await resetCountingMQTT();
       break;
       
@@ -1238,7 +1248,6 @@ function updateStatusIndicators(data) {
     if (batchInfoElement) {
       batchInfoElement.innerHTML = `
         <strong>📦 ${data.currentBatchName}</strong>
-        ${data.currentBatchDescription ? `<br><small>${data.currentBatchDescription}</small>` : ''}
         <br><small>Đơn hàng: ${data.totalOrdersInBatch || 0}</small>
       `;
       batchInfoElement.style.display = 'block';
@@ -1303,6 +1312,31 @@ function handleOrderCompletion(data) {
 }
 
 // Batch Management
+function clearAllFormFields() {
+  // Clear main order form fields (chỉ những field có ID)
+  const fieldsToCleare = [
+    'customerName', 'orderCode', 'vehicleNumber'
+  ];
+  
+  fieldsToCleare.forEach(fieldId => {
+    const element = document.getElementById(fieldId);
+    if (element) {
+      element.value = '';
+    }
+  });
+  
+  // Clear product fields using class selectors (multiple product form)
+  const productSelects = document.querySelectorAll('.productSelect');
+  const quantities = document.querySelectorAll('.quantity');
+  const warnings = document.querySelectorAll('.warningQuantity');
+  
+  productSelects.forEach(select => select.value = '');
+  quantities.forEach(input => input.value = '');
+  warnings.forEach(input => input.value = '');
+  
+  console.log('✅ All form fields cleared');
+}
+
 function createNewBatch() {
   const batchInfo = document.getElementById('batchInfo');
   const orderFormContainer = document.getElementById('orderFormContainer');
@@ -1314,30 +1348,70 @@ function createNewBatch() {
   currentOrderBatch = [];
   currentBatchId = null;
   document.getElementById('batchName').value = '';
-  document.getElementById('batchDescription').value = '';
+  
+  // XÓA SẠCH TẤT CẢ THÔNG TIN FORM KHI TẠO MỚI
+  clearAllFormFields();
   
   // Initialize products form
   productItemCounter = 0;
   addInitialProductItem();
   
+  // Cập nhật dropdown sản phẩm ngay khi tạo mới
+  updateAllProductSelects();
+  
   updateBatchPreview();
 }
 
 function loadBatch() {
+  console.log('🔄 loadBatch() called');
   const select = document.getElementById('currentBatchSelect');
-  const batchId = select.value;
+  const batchName = select.value; // Dùng tên batch thay vì ID
+  console.log('📝 Selected batch name:', batchName);
   
-  if (batchId) {
-    const batch = orderBatches.find(b => b.id == batchId);
+  if (batchName) {
+    const batch = orderBatches.find(b => b.name === batchName); // Tìm theo tên
+    console.log('🔍 Found batch:', batch);
     if (batch) {
       currentBatchId = batch.id;
       currentOrderBatch = [...batch.orders];
       document.getElementById('batchName').value = batch.name;
-      document.getElementById('batchDescription').value = batch.description || '';
+      
+      // ✅ TỰ ĐIỀN THÔNG TIN từ đơn hàng cuối để dễ thêm đơn mới (trừ mã đơn hàng)
+      if (batch.orders && batch.orders.length > 0) {
+        const lastOrder = batch.orders[batch.orders.length - 1];
+        
+        // ✅ TỰ ĐIỀN TẤT CẢ THÔNG TIN từ đơn hàng cuối (bao gồm cả mã đơn hàng) - với error handling
+        const customerNameEl = document.getElementById('customerName');
+        const vehicleNumberEl = document.getElementById('vehicleNumber');
+        const orderCodeEl = document.getElementById('orderCode');
+        
+        if (customerNameEl) customerNameEl.value = lastOrder.customerName || '';
+        if (vehicleNumberEl) vehicleNumberEl.value = lastOrder.vehicleNumber || '';
+        if (orderCodeEl) orderCodeEl.value = lastOrder.orderCode || ''; // ✅ TỰ ĐIỀN MÃ ĐƠN HÀNG
+        
+        // ✅ TỰ ĐIỀN THÔNG TIN SẢN PHẨM từ đơn hàng cuối (nếu muốn copy)
+        const firstProductSelect = document.querySelector('.productSelect');
+        const firstQuantity = document.querySelector('.quantity');
+        const firstWarningQuantity = document.querySelector('.warningQuantity');
+        
+        if (firstProductSelect && lastOrder.product) {
+          firstProductSelect.value = lastOrder.product.id || '';
+        }
+        if (firstQuantity) firstQuantity.value = lastOrder.quantity || '';
+        if (firstWarningQuantity) firstWarningQuantity.value = lastOrder.warningQuantity || '';
+        
+        console.log('✅ Auto-filled form from last order:', lastOrder.customerName);
+      } else {
+        // Nếu batch trống, xóa form
+        clearAllFormFields();
+      }
       
       document.getElementById('batchInfo').style.display = 'block';
       document.getElementById('orderFormContainer').style.display = 'block';
       updateBatchPreview();
+      
+      // Cập nhật dropdown sản phẩm
+      updateAllProductSelects();
       
       // GỬI THÔNG TIN BATCH LÊN ESP32 KHI CHỌN
       activateBatchOnESP32(batch);
@@ -1346,6 +1420,9 @@ function loadBatch() {
 }
 
 function addOrderToBatch() {
+  console.log('🔄 addOrderToBatch() called');
+  console.log('📊 Current batch size before add:', currentOrderBatch.length);
+  
   const customerName = document.getElementById('customerName').value.trim();
   const orderCode = document.getElementById('orderCode').value.trim();
   const vehicleNumber = document.getElementById('vehicleNumber').value.trim();
@@ -1353,30 +1430,34 @@ function addOrderToBatch() {
   const quantity = parseInt(document.getElementById('quantity').value);
   const warningQuantity = parseInt(document.getElementById('warningQuantity').value) || Math.floor(quantity * 0.1);
   
+  console.log('📝 Form data:', {
+    customerName, orderCode, vehicleNumber, productId, quantity, warningQuantity
+  });
+  
   if (!customerName || !orderCode || !vehicleNumber || !productId || !quantity) {
     alert('Vui lòng điền đầy đủ thông tin đơn hàng');
+    console.log('❌ Missing required fields');
     return;
   }
   
   const product = currentProducts.find(p => p.id == productId);
   if (!product) {
     alert('Sản phẩm không hợp lệ');
+    console.log('❌ Product not found:', productId);
     return;
   }
   
-  // Check if order code already exists in current batch
-  if (currentOrderBatch.find(o => o.orderCode === orderCode)) {
-    alert('Mã đơn hàng đã tồn tại trong danh sách');
-    return;
-  }
+  // ✅ CHO PHÉP DUPLICATE ORDER CODE - Bỏ check duplicate để có thể tạo nhiều đơn cùng mã
+  console.log('✅ Allowing duplicate orderCode for multiple orders with same code');
   
   const newOrder = {
-    id: Date.now(),
+    id: orderIdCounter++,
     orderNumber: currentOrderBatch.length + 1,
     customerName,
     orderCode,
     vehicleNumber,
     product,
+    productName: product.name, // Thêm để đảm bảo tương thích
     quantity,
     warningQuantity,
     currentCount: 0,
@@ -1386,20 +1467,62 @@ function addOrderToBatch() {
   };
   
   currentOrderBatch.push(newOrder);
+  console.log('✅ Order added successfully. New batch size:', currentOrderBatch.length);
+  console.log('📦 New order:', newOrder);
+  
   updateBatchPreview();
   
-  // KHÔNG gửi đơn hàng đến ESP32 ngay - chỉ gửi khi bắt đầu đếm
-  // sendOrderToESP32(newOrder);
+  // Kiểm tra xem có phải đang chỉnh sửa batch đã lưu không
+  const isEditingExistingBatch = currentBatchId && orderBatches.find(b => b.id == currentBatchId);
   
-  // Clear form
-  document.getElementById('orderForm').reset();
+  if (isEditingExistingBatch) {
+    // Nếu đang chỉnh sửa batch đã lưu, cập nhật ngay vào danh sách chính và gửi đến ESP32
+    const batchIndex = orderBatches.findIndex(b => b.id == currentBatchId);
+    if (batchIndex !== -1) {
+      orderBatches[batchIndex].orders = [...currentOrderBatch];
+      saveOrderBatches();
+      
+      // Gửi đến ESP32 cho batch đã lưu
+      sendOrderUpdateToESP32(newOrder, batchIndex).then(() => {
+        console.log(`✅ Đã gửi đơn hàng mới ${newOrder.orderCode} đến ESP32 cho batch đã lưu`);
+        updateOverview(); // Cập nhật số liệu tổng quan
+      }).catch(error => {
+        console.error(`❌ Lỗi gửi đơn hàng ${newOrder.orderCode} đến ESP32:`, error);
+      });
+    }
+  } else {
+    // Nếu đang tạo batch mới (preview), chỉ gửi thông tin preview đến ESP32
+    sendOrderToESP32(newOrder).then(() => {
+      console.log(`✅ Đã gửi đơn hàng preview ${newOrder.orderCode} đến ESP32`);
+    }).catch(error => {
+      console.error(`❌ Lỗi gửi đơn hàng preview ${newOrder.orderCode} đến ESP32:`, error);
+    });
+  }
   
-  showNotification('Thêm đơn hàng vào danh sách thành công', 'success');
+  // Clear form - chỉ xóa mã đơn hàng, giữ thông tin khách hàng
+  document.getElementById('orderCode').value = '';
+  // Reset product selection
+  const productSelects = document.querySelectorAll('.productSelect');
+  const quantities = document.querySelectorAll('.quantity');
+  const warnings = document.querySelectorAll('.warningQuantity');
+  
+  productSelects.forEach(select => select.value = '');
+  quantities.forEach(input => input.value = '');
+  warnings.forEach(input => input.value = '');
+  
+  showNotification('Thêm đơn hàng vào danh sách thành công và gửi đến ESP32', 'success');
 }
 
 function removeOrderFromBatch(index) {
+  console.log('🗑️ removeOrderFromBatch called with index:', index);
+  console.log('📊 currentOrderBatch length before:', currentOrderBatch.length);
+  
   if (confirm('Bạn có chắc chắn muốn xóa đơn hàng này khỏi danh sách?')) {
     const orderToRemove = currentOrderBatch[index];
+    console.log('🗑️ Removing order:', orderToRemove);
+    
+    // Kiểm tra xem có phải đang chỉnh sửa batch đã lưu không
+    const isEditingExistingBatch = currentBatchId && orderBatches.find(b => b.id == currentBatchId);
     
     // Xóa từ array local
     currentOrderBatch.splice(index, 1);
@@ -1409,12 +1532,29 @@ function removeOrderFromBatch(index) {
       order.orderNumber = i + 1;
     });
     
-    // 🗑️ Nếu đang edit batch có sẵn, gửi lệnh xóa đến ESP32
-    if (currentBatchId && orderToRemove && orderToRemove.id) {
-      deleteOrderFromBatchESP32(currentBatchId, orderToRemove.id);
+    console.log('📊 currentOrderBatch length after:', currentOrderBatch.length);
+    
+    if (isEditingExistingBatch) {
+      // Nếu đang chỉnh sửa batch đã lưu, cập nhật ngay vào danh sách chính và gửi delete đến ESP32
+      const batchIndex = orderBatches.findIndex(b => b.id == currentBatchId);
+      if (batchIndex !== -1) {
+        orderBatches[batchIndex].orders = [...currentOrderBatch];
+        saveOrderBatches();
+        
+        // Gửi delete đến ESP32 cho batch đã lưu
+        sendOrderDeleteToESP32(orderToRemove, batchIndex).then(() => {
+          console.log(`✅ Đã xóa đơn hàng ${orderToRemove.orderCode} khỏi ESP32 cho batch đã lưu`);
+          updateOverview(); // Cập nhật số liệu tổng quan
+        }).catch(error => {
+          console.error(`❌ Lỗi xóa đơn hàng ${orderToRemove.orderCode} khỏi ESP32:`, error);
+        });
+      }
     }
+    // Nếu đang tạo batch mới (preview), không cần gửi delete đến ESP32
+    // ESP32 chỉ cần biết khi batch được save cuối cùng
     
     updateBatchPreview();
+    showNotification('Đã xóa đơn hàng khỏi danh sách', 'success');
   }
 }
 
@@ -1431,13 +1571,17 @@ function updateBatchPreview() {
   tbody.innerHTML = '';
   
   currentOrderBatch.forEach((order, index) => {
+    // Get product info to show code + name
+    const product = order.product || currentProducts.find(p => p.name === order.productName);
+    const productDisplay = product && product.code ? `${product.code} - ${product.name}` : (order.productName || 'N/A');
+    
     const row = document.createElement('tr');
     row.innerHTML = `
       <td>${index + 1}</td>
       <td>${order.customerName}</td>
       <td>${order.orderCode}</td>
       <td>${order.vehicleNumber}</td>
-      <td>${order.productName}</td>
+      <td>${productDisplay}</td>
       <td>${order.quantity}</td>
       <td>
         <button class="btn-danger" onclick="removeOrderFromBatch(${index})" style="padding: 5px 10px; font-size: 12px;">
@@ -1449,14 +1593,14 @@ function updateBatchPreview() {
   });
 }
 
-function saveBatch() {
+async function saveBatch() {
   const batchName = document.getElementById('batchName').value.trim();
-  const batchDescription = document.getElementById('batchDescription').value.trim();
   
   console.log('🔧 DEBUG: Starting saveBatch()');
   console.log('   - currentBatchId:', currentBatchId);
   console.log('   - batchName:', batchName);
   console.log('   - currentOrderBatch length:', currentOrderBatch.length);
+  console.log('   - Memory usage check: currentOrderBatch size =', JSON.stringify(currentOrderBatch).length, 'chars');
   
   if (!batchName) {
     alert('Vui lòng nhập tên danh sách');
@@ -1468,10 +1612,16 @@ function saveBatch() {
     return;
   }
   
+  // KIỂM TRA GIỚI HẠN SỐ LƯỢNG ĐƠN HÀNG
+  if (currentOrderBatch.length > 20) {
+    if (!confirm(`Danh sách có ${currentOrderBatch.length} đơn hàng. ESP32 có thể không xử lý được quá nhiều đơn hàng cùng lúc. Bạn có muốn tiếp tục?`)) {
+      return;
+    }
+  }
+  
   const batch = {
-    id: currentBatchId || Date.now(),
+    id: currentBatchId || batchIdCounter++,
     name: batchName,
-    description: batchDescription,
     orders: [...currentOrderBatch],
     createdAt: new Date().toISOString(),
     isActive: false
@@ -1482,7 +1632,7 @@ function saveBatch() {
   console.log('   - Batch ID:', batch.id);
   console.log('   - Orders count:', currentOrderBatch.length);
   console.log('   - First order sample:', currentOrderBatch[0]);
-  console.log('   - Full batch object:', batch);
+  console.log('   - Full batch object size:', JSON.stringify(batch).length, 'chars');
   
   if (currentBatchId) {
     // Update existing batch
@@ -1506,9 +1656,23 @@ function saveBatch() {
   updateCurrentBatchSelect();
   
   // GỬI TẤT CẢ BATCHES ĐẾN ESP32 ĐỂ SYNC TOÀN BỘ DỮ LIỆU
-  sendOrderBatchesToESP32();
+  const syncSuccess = await sendOrderBatchesToESP32();
   
-  showNotification('Lưu danh sách đơn hàng thành công', 'success');
+  if (syncSuccess) {
+    // GỬI TỪNG ĐƠN HÀNG TRONG BATCH ĐẾN ESP32 ĐỂ ESP32 BIẾT
+    for (const order of batch.orders) {
+      try {
+        await sendOrderToESP32(order);
+        console.log(`✅ Đã gửi đơn hàng ${order.orderCode} đến ESP32`);
+      } catch (error) {
+        console.error(`❌ Lỗi gửi đơn hàng ${order.orderCode} đến ESP32:`, error);
+      }
+    }
+    
+    showNotification('Lưu danh sách đơn hàng thành công và đồng bộ với ESP32', 'success');
+  } else {
+    showNotification('Lưu danh sách thành công nhưng có lỗi đồng bộ với ESP32', 'warning');
+  }
   
   // Reset form
   document.getElementById('batchInfo').style.display = 'none';
@@ -1521,9 +1685,9 @@ function saveBatch() {
 
 function clearBatch() {
   const select = document.getElementById('batchSelector');
-  const selectedBatchId = select ? parseInt(select.value) : null;
+  const selectedBatchName = select ? select.value : null; // Dùng tên batch thay vì ID
   
-  if (!selectedBatchId) {
+  if (!selectedBatchName) {
     // Nếu chưa chọn batch nào, chỉ xóa đơn hàng đang tạo
     if (confirm('Bạn có chắc chắn muốn xóa tất cả đơn hàng trong danh sách hiện tại?')) {
       currentOrderBatch = [];
@@ -1534,16 +1698,16 @@ function clearBatch() {
   }
   
   // Nếu đã chọn batch, xóa batch đó
-  const batchToDelete = orderBatches.find(b => b.id === selectedBatchId);
+  const batchToDelete = orderBatches.find(b => b.name === selectedBatchName); // Tìm theo tên
   if (!batchToDelete) return;
   
   if (confirm(`Bạn có chắc chắn muốn xóa danh sách "${batchToDelete.name}"?`)) {
     // Xóa batch được chọn
-    orderBatches = orderBatches.filter(b => b.id !== selectedBatchId);
+    orderBatches = orderBatches.filter(b => b.name !== selectedBatchName); // Xóa theo tên
     saveOrderBatches();
     
     // GỬI LỆNH XÓA BATCH ĐẾN ESP32
-    deleteBatchFromESP32(selectedBatchId);
+    deleteBatchFromESP32(batchToDelete.id);
     
     // Reset selection
     select.value = '';
@@ -1567,13 +1731,15 @@ function clearBatch() {
 
 function switchBatch() {
   const select = document.getElementById('batchSelector');
-  if (!select || !select.value) return;
+  if (!select || !select.value) {
+    return;
+  }
   
-  const batchId = parseInt(select.value);
-  console.log('Switching to batch ID:', batchId);
+  const batchName = select.value; // Dùng tên batch thay vì ID
+  console.log('Switching to batch name:', batchName);
   
-  if (batchId) {
-    const batch = orderBatches.find(b => b.id == batchId);
+  if (batchName) {
+    const batch = orderBatches.find(b => b.name === batchName); // Tìm theo tên
     if (batch) {
       // Set as active batch
       orderBatches.forEach(b => b.isActive = false);
@@ -1596,9 +1762,11 @@ function switchBatch() {
       const ordersCount = (batch.orders && batch.orders.length) || 0;
       console.log('Activated batch:', batch.name, 'with', ordersCount, 'orders');
       
-      currentPage = 1;
+      // KHÔNG RESET currentPage để tránh nhảy về đơn 1
+      // currentPage = 1; // BỎ DÒNG NÀY
       updateBatchDisplay();
       updateOverview();
+      
       showNotification(`Đã chuyển sang danh sách: ${batch.name}`, 'success');
     } else {
       console.error('Batch not found:', batchId);
@@ -1617,23 +1785,25 @@ function updateBatchSelector() {
   
   select.innerHTML = '<option value="">Chọn danh sách đơn hàng</option>';
   
+  // BỎ auto-activate để tránh thay đổi batch đang chọn
   // Auto-activate first batch if no active batch exists
-  if (orderBatches.length > 0 && !orderBatches.find(b => b.isActive)) {
-    orderBatches[0].isActive = true;
-    saveOrderBatches();
-    console.log('Auto-activated first batch:', orderBatches[0].name);
-  }
+  // if (orderBatches.length > 0 && !orderBatches.find(b => b.isActive)) {
+  //   orderBatches[0].isActive = true;
+  //   saveOrderBatches();
+  //   console.log('Auto-activated first batch:', orderBatches[0].name);
+  // }
   
   orderBatches.forEach(batch => {
     const option = document.createElement('option');
-    option.value = batch.id;
+    option.value = batch.name; // Dùng tên batch làm value thay vì ID
     const ordersCount = (batch.orders && batch.orders.length) || 0;
     option.textContent = `${batch.name} (${ordersCount} đơn)`;
     if (batch.isActive) {
       option.selected = true;
+      console.log('✅ Setting selected for active batch:', batch.name);
     }
     select.appendChild(option);
-    // console.log('Added batch option:', batch.name);
+    console.log('📋 Added batch option:', batch.name, 'isActive:', batch.isActive);
   });
 }
 
@@ -1645,8 +1815,12 @@ function updateCurrentBatchSelect() {
     
     orderBatches.forEach(batch => {
       const option = document.createElement('option');
-      option.value = batch.id;
+      option.value = batch.name; // Dùng tên batch thay vì ID
       option.textContent = batch.name;
+      if (batch.isActive) {
+        option.selected = true;
+        console.log('✅ Setting selected for active batch in currentBatchSelect:', batch.name);
+      }
       select.appendChild(option);
     });
   }
@@ -1658,12 +1832,18 @@ function updateCurrentBatchSelect() {
     
     orderBatches.forEach(batch => {
       const option = document.createElement('option');
-      option.value = batch.id;
-      option.textContent = batch.name;
+      option.value = batch.name; // Dùng tên batch thay vì ID
+      const ordersCount = (batch.orders && batch.orders.length) || 0;
+      option.textContent = `${batch.name} (${ordersCount} đơn)`;
+      if (batch.isActive) {
+        option.selected = true;
+        console.log('✅ Setting selected for active batch in batchSelector:', batch.name);
+      }
       batchSelector.appendChild(option);
+      console.log('📋 Added batch to batchSelector:', batch.name, 'isActive:', batch.isActive);
     });
     
-    // console.log('✅ Updated batchSelector with', orderBatches.length, 'batches');
+    console.log('✅ Updated batchSelector with', orderBatches.length, 'batches');
   }
 }
 
@@ -1696,14 +1876,13 @@ function updateBatchDisplay() {
   const ordersCount = (activeBatch.orders && activeBatch.orders.length) || 0;
   // console.log('Displaying batch:', activeBatch.name, 'with', ordersCount, 'orders');
   
-  // Update batch selector if needed
   const batchSelector = document.getElementById('batchSelector');
-  if (batchSelector && batchSelector.value !== activeBatch.id) {
+  if (batchSelector && batchSelector.value != activeBatch.id) {
     batchSelector.value = activeBatch.id;
   }
   
-  // Reset to first page when switching batches
-  currentPage = 1;
+  // KHÔNG RESET currentPage - giữ nguyên trang hiện tại
+  // currentPage = 1; // BỎ DÒNG NÀY
   
   // Update the orders display
   updateOrderTable();
@@ -1825,32 +2004,32 @@ function selectOrder(orderId, checked) {
     order.selected = checked;
     console.log('📝 After update - order.selected:', order.selected);
     
-    const productName = order.product?.name || order.productName || 'Unknown product';
-    console.log(`Order ${productName} ${checked ? 'selected' : 'deselected'}`);
+    // Get product info with both code and name
+    const product = order.product || currentProducts.find(p => p.name === order.productName);
+    const productName = product?.name || order.productName || 'Unknown product';
+    const productCode = product?.code || '';
+    const productDisplay = productCode ? `${productCode} - ${productName}` : productName;
+    
+    console.log(`Order ${productDisplay} ${checked ? 'selected' : 'deselected'}`);
     
     // 🚀 GỬI THÔNG TIN SẢN PHẨM ĐẾN ESP32 KHI CHỌN
     if (checked) {
       const plannedQuantity = order.plannedQuantity || order.quantity;
-      console.log('📦 Sending product info to ESP32:', productName, 'Target:', plannedQuantity);
+      console.log('📦 Sending product info to ESP32:', productDisplay, 'Target:', plannedQuantity);
       
-      // Gửi cả set_product và batch_info để đảm bảo ESP32 nhận được
-      sendESP32Command('set_product', {
+      // Gửi thông tin đơn hàng đầy đủ bao gồm productCode
+      sendESP32Command('set_current_order', {
         productName: productName,
-        target: plannedQuantity
+        productCode: productCode,
+        productDisplay: productDisplay,
+        customerName: order.customerName,
+        orderCode: order.orderCode,
+        target: plannedQuantity,
+        warningQuantity: 5, // Mặc định 5 cho warning
+        keepCount: false, // Reset count khi chọn đơn mới
+        isRunning: false  // Chỉ set order info, chưa chạy
       }).catch(error => {
-        console.error('Failed to send product to ESP32:', error);
-      });
-      
-      // Gửi batch_info để cập nhật toàn bộ thông tin
-      const productName = order.product?.name || order.productName || 'Unknown product';
-      const orderQuantity = order.plannedQuantity || order.quantity;
-      sendESP32Command('batch_info', {
-        firstOrder: {
-          productName: productName,
-          quantity: orderQuantity
-        }
-      }).catch(error => {
-        console.error('Failed to send batch info to ESP32:', error);
+        console.error('Failed to send order to ESP32:', error);
       });
     }
     
@@ -1912,14 +2091,23 @@ function updateOrderTable() {
     const currentCountText = order.currentCount > 0 ? ` (${order.currentCount})` : '';
     
     row.innerHTML = `
-      <td><span class="order-number">${order.orderNumber || order.orderCode || 'N/A'}</span></td>
+      <td><span class="order-number">${order.orderCode || 'N/A'}</span></td>
       <td>
         <input type="checkbox" ${order.selected ? 'checked' : ''} 
                onchange="selectOrder(${order.id}, this.checked)"
                ${order.status === 'counting' || order.status === 'completed' ? 'disabled' : ''}>
       </td>
       <td><strong>${order.quantity}${currentCountText}</strong></td>
-      <td>${order.product?.name || order.productName || 'N/A'}</td>
+      <td>
+        ${(() => {
+          const product = order.product || currentProducts.find(p => p.name === order.productName);
+          if (product && product.code) {
+            return `${product.code} - ${product.name}`;
+          } else {
+            return order.product?.name || order.productName || 'N/A';
+          }
+        })()}
+      </td>
       <td>${order.customerName}</td>
       <td>${order.vehicleNumber}</td>
       <td>
@@ -2059,6 +2247,14 @@ async function startCounting() {
   
   // Tính tổng target cho toàn bộ batch
   const totalTarget = selectedOrders.reduce((sum, order) => sum + order.quantity, 0);
+  
+  // Get product info for current order
+  const currentOrder = selectedOrders[currentOrderIndex];
+  const product = currentOrder.product || currentProducts.find(p => p.name === currentOrder.productName);
+  const productName = product?.name || currentOrder.productName;
+  const productCode = product?.code || '';
+  const productDisplay = productCode ? `${productCode} - ${productName}` : productName;
+  
   const batchInfo = {
     totalTarget: totalTarget,
     batchTotalTarget: totalTarget, // ESP32 cần biến này
@@ -2066,10 +2262,12 @@ async function startCounting() {
     currentOrderIndex: currentOrderIndex,
     // Gửi thông tin đơn đầu tiên để ESP32 hiển thị
     firstOrder: {
-      customerName: selectedOrders[currentOrderIndex].customerName,
-      productName: selectedOrders[currentOrderIndex].productName || selectedOrders[currentOrderIndex].product?.name,
-      orderCode: selectedOrders[currentOrderIndex].orderCode,
-      quantity: selectedOrders[currentOrderIndex].quantity
+      customerName: currentOrder.customerName,
+      productName: productName,
+      productCode: productCode,
+      productDisplay: productDisplay,
+      orderCode: currentOrder.orderCode,
+      quantity: currentOrder.quantity
     }
   };
   
@@ -2089,6 +2287,20 @@ async function startCounting() {
       await sendESP32Command('start');
       await sendESP32Command('batch_info', batchInfo);
     }
+    
+    // GỬI THÔNG TIN ĐƠN HÀNG HIỆN TẠI ĐỂ ESP32 HIỂN THỊ ĐÚNG TRÊN LED
+    await sendESP32Command('set_current_order', {
+      orderCode: currentOrder.orderCode,
+      customerName: currentOrder.customerName,
+      productName: productName,
+      productCode: productCode,
+      target: currentOrder.quantity,
+      warningQuantity: 5,
+      keepCount: false, // Reset count khi bắt đầu mới
+      isRunning: true   // Đảm bảo ESP32 biết đang chạy
+    });
+    
+    console.log('✅ Sent current order info to ESP32 for LED display:', productCode, productName);
     
     updateUIForStart(); // Cập nhật UI state
     saveOrderBatches();
@@ -2267,7 +2479,7 @@ async function sendBatchOrdersToESP32(orders) {
       if (response.ok) {
         const result = await response.text();
         console.log('Danh sách đơn hàng đã gửi thành công đến ESP32 (batch):', result);
-        showNotification(`Đã gửi ${orders.length} đơn hàng đến ESP32`, 'success');
+        showNotification(`Đã gửi ${orders.length} đơn hàng đến thiết bị`, 'success');
         return true;
       } else if (response.status === 404) {
         // Endpoint không tồn tại, fallback sang gửi từng đơn
@@ -2287,7 +2499,7 @@ async function sendBatchOrdersToESP32(orders) {
     
   } catch (error) {
     console.error('Lỗi gửi danh sách đơn hàng đến ESP32:', error);
-    showNotification('Lỗi gửi danh sách đến ESP32: ' + error.message, 'error');
+    showNotification('Lỗi gửi danh sách đến thiết bị: ' + error.message, 'error');
     return false;
   }
 }
@@ -2315,7 +2527,7 @@ async function sendOrdersOneByOne(orders) {
     
     if (successCount === orders.length) {
       console.log('Tất cả đơn hàng đã được gửi thành công (fallback)');
-      showNotification(`Đã gửi ${successCount}/${orders.length} đơn hàng đến ESP32`, 'success');
+      showNotification(`Đã gửi ${successCount}/${orders.length} đơn hàng đến thiết bị`, 'success');
       return true;
     } else {
       console.warn(`Chỉ gửi được ${successCount}/${orders.length} đơn hàng`);
@@ -2348,7 +2560,7 @@ function addProduct() {
   }
   
   const newProduct = {
-    id: Date.now(),
+    id: productIdCounter++,
     name: productName,
     code: productCode,
     unitWeight: unitWeight,
@@ -2440,7 +2652,7 @@ function updateProductSelect() {
   currentProducts.forEach(product => {
     const option = document.createElement('option');
     option.value = product.id;
-    option.textContent = `${product.name} - ${product.code}`;
+    option.textContent = product.code ? `${product.code} - ${product.name}` : product.name;
     select.appendChild(option);
   });
 }
@@ -2457,7 +2669,7 @@ function updateAllProductSelects() {
     currentProducts.forEach(product => {
       const option = document.createElement('option');
       option.value = product.name; // Dùng name thay vì id cho edit
-      option.textContent = `${product.name} - ${product.code}`;
+      option.textContent = product.code ? `${product.code} - ${product.name}` : product.name;
       editProductSelect.appendChild(option);
     });
   }
@@ -2471,7 +2683,7 @@ function updateAllProductSelects() {
     currentProducts.forEach(product => {
       const option = document.createElement('option');
       option.value = product.name; // Dùng name cho consistency
-      option.textContent = `${product.name} - ${product.code}`;
+      option.textContent = product.code ? `${product.code} - ${product.name}` : product.name;
       select.appendChild(option);
     });
     
@@ -2484,9 +2696,9 @@ function updateAllProductSelects() {
 
 // Debug function to check data
 function debugBatchData() {
-  console.log('=== DEBUG BATCH DATA ===');
-  console.log('orderBatches:', orderBatches);
-  console.log('Number of batches:', orderBatches.length);
+  // console.log('=== DEBUG BATCH DATA ===');
+  // console.log('orderBatches:', orderBatches);
+  // console.log('Number of batches:', orderBatches.length);
   
   orderBatches.forEach((batch, index) => {
     console.log(`Batch ${index}:`, {
@@ -2499,7 +2711,8 @@ function debugBatchData() {
     
     if (batch.orders.length > 0) {
       batch.orders.forEach((order, oIndex) => {
-        console.log(`  Order ${oIndex}:`, {
+        console.log(`  Order ${oIndex}:`, 
+          {
           selected: order.selected,
           quantity: order.quantity,
           currentCount: order.currentCount || 0
@@ -2815,6 +3028,22 @@ function loadOrderBatches() {
       }));
       console.log('✅ Loaded', orderBatches.length, 'batches from localStorage');
       
+      // Update counters to avoid ID conflicts
+      let maxBatchId = 0;
+      let maxOrderId = 0;
+      
+      orderBatches.forEach(batch => {
+        if (batch.id > maxBatchId) maxBatchId = batch.id;
+        batch.orders.forEach(order => {
+          if (order.id > maxOrderId) maxOrderId = order.id;
+        });
+      });
+      
+      batchIdCounter = maxBatchId + 1;
+      orderIdCounter = maxOrderId + 1;
+      
+      console.log('🔢 Updated counters - batchIdCounter:', batchIdCounter, 'orderIdCounter:', orderIdCounter);
+      
       if (orderBatches.length > 0) {
         console.log('📋 First batch sample from localStorage:', orderBatches[0]);
       }
@@ -2882,7 +3111,31 @@ async function sendOrderBatchesToESP32() {
     // Validate orderBatches trước khi gửi
     if (!Array.isArray(orderBatches)) {
       console.error('❌ orderBatches is not an array:', typeof orderBatches);
-      return;
+      return false;
+    }
+    
+    // Tính tổng số đơn hàng và kích thước dữ liệu
+    let totalOrders = 0;
+    orderBatches.forEach(batch => {
+      if (batch.orders && Array.isArray(batch.orders)) {
+        totalOrders += batch.orders.length;
+      }
+    });
+    
+    const dataSize = JSON.stringify(orderBatches).length;
+    console.log(`📊 Data summary: ${orderBatches.length} batches, ${totalOrders} total orders, ${dataSize} chars`);
+    
+    // Cảnh báo nếu dữ liệu quá lớn (ESP32 có giới hạn)
+    if (dataSize > 10000) { // Giảm từ 12KB xuống 10KB safety limit cho ESP32
+      console.warn('⚠️ Data size large:', dataSize, 'chars - may cause ESP32 memory issues');
+      showNotification(`Cảnh báo: Dữ liệu lớn (${Math.round(dataSize/1000)}KB) có thể gây lỗi ESP32`, 'warning');
+      
+      // Suggest user to reduce orders if data is too large
+      if (dataSize > 15000) {
+        if (!confirm(`Dữ liệu rất lớn (${Math.round(dataSize/1000)}KB). ESP32 có thể không xử lý được.\n\nBạn có muốn tiếp tục? (Khuyến nghị: Giảm số đơn hàng hoặc chia nhỏ batch)`)) {
+          return false;
+        }
+      }
     }
     
     // Log first batch để debug
@@ -2893,9 +3146,12 @@ async function sendOrderBatchesToESP32() {
       console.log('   - Orders array exists:', !!orderBatches[0].orders);
       console.log('   - Orders count:', orderBatches[0].orders?.length || 0);
       if (orderBatches[0].orders && orderBatches[0].orders.length > 0) {
-        console.log('   - First order:', orderBatches[0].orders[0]);
+        console.log('   - First order sample:', {
+          orderCode: orderBatches[0].orders[0].orderCode,
+          productName: orderBatches[0].orders[0].productName,
+          quantity: orderBatches[0].orders[0].quantity
+        });
       }
-      console.log('   - Full batch:', orderBatches[0]);
     }
     
     const response = await fetch('/api/orders', {
@@ -2909,7 +3165,7 @@ async function sendOrderBatchesToESP32() {
     if (response.ok) {
       const result = await response.json();
       console.log('✅ Order batches sent to ESP32 successfully:', result);
-      //showNotification(`Đã lưu ${orderBatches.length} lô đơn hàng lên ESP32`, 'success');
+      return true;
     } else {
       const errorText = await response.text();
       throw new Error(`HTTP error! status: ${response.status}, response: ${errorText}`);
@@ -2917,7 +3173,8 @@ async function sendOrderBatchesToESP32() {
     
   } catch (error) {
     console.error('❌ Error sending order batches to ESP32:', error);
-    showNotification('Lỗi lưu đơn hàng lên ESP32: ' + error.message, 'error');
+    showNotification('Lỗi lưu đơn hàng lên thiết bị: ' + error.message, 'error');
+    return false;
   }
 }
 
@@ -2925,6 +3182,14 @@ function loadProducts() {
   const saved = localStorage.getItem('products');
   if (saved) {
     currentProducts = JSON.parse(saved);
+    
+    // Update productIdCounter to avoid conflicts
+    let maxProductId = 0;
+    currentProducts.forEach(product => {
+      if (product.id > maxProductId) maxProductId = product.id;
+    });
+    productIdCounter = maxProductId + 1;
+    console.log('🔢 Updated productIdCounter:', productIdCounter);
   }
   updateProductSelect();
 }
@@ -2999,17 +3264,17 @@ async function loadSettingsFromESP32() {
       updateSettingsForm();
       
       console.log('✅ Settings loaded and synced from ESP32:', settings);
-      showNotification('Đã tải cài đặt từ ESP32', 'success');
+      // showNotification('Đã tải cài đặt từ ESP32', 'success');
       
       // ⚡ CẬP NHẬT NGAY TÊN BĂNG TẢI TRÊN DISPLAY
       updateConveyorNameDisplay();
     } else {
       console.log('❌ Failed to load settings from ESP32, using defaults');
-      showNotification('Không thể tải cài đặt từ ESP32', 'warning');
+      // showNotification('Không thể tải cài đặt từ ESP32', 'warning');
     }
   } catch (error) {
     console.error('❌ Error loading settings from ESP32:', error);
-    showNotification('Lỗi kết nối ESP32', 'error');
+    showNotification('Lỗi kết nối thiết bị', 'error');
   }
 }
 
@@ -3185,7 +3450,7 @@ async function sendBatchToESP32(batch) {
       const result = await sendOrderToESP32(order);
       if (!result) {
         console.error(`Failed to send order ${i + 1}`);
-        showNotification(`Lỗi gửi đơn hàng ${i + 1} đến ESP32`, 'error');
+        showNotification(`Lỗi gửi đơn hàng ${i + 1} đến thiết bị`, 'error');
         return false;
       }
       
@@ -3194,12 +3459,12 @@ async function sendBatchToESP32(batch) {
     }
     
     console.log('All orders in batch sent to ESP32 successfully');
-    showNotification(`Đã gửi ${batch.orders.length} đơn hàng đến ESP32`, 'success');
+    showNotification(`Đã gửi ${batch.orders.length} đơn hàng đến thiết bị`, 'success');
     return true;
     
   } catch (error) {
     console.error('Error sending batch to ESP32:', error);
-    showNotification('Lỗi gửi danh sách đến ESP32: ' + error.message, 'error');
+    showNotification('Lỗi gửi danh sách đến thiết bị: ' + error.message, 'error');
     return false;
   }
 }
@@ -3212,6 +3477,7 @@ async function sendOrderToESP32(order) {
       orderCode: order.orderCode,
       vehicleNumber: order.vehicleNumber,
       productName: order.product?.name || order.productName,
+      productCode: order.product?.code || '',
       quantity: order.quantity,
       warningQuantity: order.warningQuantity
     };
@@ -3221,6 +3487,7 @@ async function sendOrderToESP32(order) {
     console.log('Order Code:', payload.orderCode);
     console.log('Vehicle:', payload.vehicleNumber);
     console.log('Product:', payload.productName);
+    console.log('Product Code:', payload.productCode);
     console.log('Quantity:', payload.quantity);
     console.log('Warning:', payload.warningQuantity);
     console.log('Full payload:', JSON.stringify(payload, null, 2));
@@ -3253,15 +3520,29 @@ async function sendOrderToESP32(order) {
           const orders = await checkResponse.json();
           console.log('ESP32 current orders after sending:', orders);
           
-          const sentOrder = orders.find(o => 
-            o.orderCode === payload.orderCode || 
-            o.productName === payload.productName
-          );
-          
-          if (sentOrder) {
-            console.log('✅ Order confirmed saved in ESP32:', sentOrder);
+          // ESP32 trả về array of batches, không phải array of orders
+          if (orders && Array.isArray(orders) && orders.length > 0) {
+            let orderFound = false;
+            
+            // Tìm trong tất cả batches
+            orders.forEach(batch => {
+              if (batch.orders && Array.isArray(batch.orders)) {
+                const sentOrder = batch.orders.find(o => 
+                  o.orderCode === payload.orderCode || 
+                  o.productName === payload.productName
+                );
+                if (sentOrder) {
+                  console.log('✅ Order confirmed saved in ESP32:', sentOrder);
+                  orderFound = true;
+                }
+              }
+            });
+            
+            if (!orderFound) {
+              console.log('❌ Order NOT found in ESP32 storage');
+            }
           } else {
-            console.log('❌ Order NOT found in ESP32 storage');
+            console.log('📋 ESP32 orders list is empty or invalid');
           }
         }
       } catch (error) {
@@ -3273,7 +3554,7 @@ async function sendOrderToESP32(order) {
     
   } catch (error) {
     console.error('Error sending order to ESP32:', error);
-    showNotification('Lỗi gửi đơn hàng đến ESP32: ' + error.message, 'error');
+    showNotification('Lỗi gửi đơn hàng đến thiết bị: ' + error.message, 'error');
     return null;
   }
 }
@@ -3294,7 +3575,6 @@ async function activateBatchOnESP32(batch) {
     const batchPayload = {
       batchName: batch.name,
       batchId: batch.id,
-      batchDescription: batch.description || '',
       totalOrders: batch.orders.length,
       batchTotalTarget: batchTotalTarget  // Thêm tổng target
     };
@@ -3370,12 +3650,12 @@ async function sendProductToESP32(product) {
       result = { status: 'OK', message: resultText };
     }
     
-    showNotification('Sản phẩm đã được gửi đến ESP32', 'success');
+    showNotification('Sản phẩm đã được gửi đến thiết bị', 'success');
     return result;
     
   } catch (error) {
     console.error('Error sending product to ESP32:', error);
-    showNotification('Lỗi gửi sản phẩm đến ESP32: ' + error.message, 'error');
+    showNotification('Lỗi gửi sản phẩm đến thiết bị: ' + error.message, 'error');
     return null;
   }
 }
@@ -3668,19 +3948,24 @@ async function moveToNextOrder() {
       console.log(`Status updated: ${nextOrder.orderCode} -> counting`);
       
       // Gửi lệnh set_current_order đến ESP32 (dễ xử lý hơn next_order)
+      const nextProduct = nextOrder.product || currentProducts.find(p => p.name === nextOrder.productName);
+      const nextProductCode = nextProduct?.code || '';
+      const nextProductName = nextProduct?.name || nextOrder.productName || 'Unknown product';
+      
       await sendESP32Command('set_current_order', {
         orderCode: nextOrder.orderCode,
         customerName: nextOrder.customerName,
-        productName: nextOrder.product?.name || nextOrder.productName,
+        productName: nextProductName,
+        productCode: nextProductCode,  // Thêm productCode
         target: nextOrder.quantity,
-        warningQuantity: nextOrder.warningQuantity,
+        warningQuantity: nextOrder.warningQuantity || 5,
         orderIndex: countingState.currentOrderIndex,
         totalOrders: selectedOrders.length,
         keepCount: true, // Không reset count
         isRunning: true  // Đảm bảo ESP32 biết phải tiếp tục chạy
       });
       
-      console.log('ESP32 next_order command sent, updating UI...');
+      console.log('ESP32 next_order command sent with productCode:', nextProductCode, 'updating UI...');
       
       showNotification(`Chuyen den don ${countingState.currentOrderIndex + 1}/${selectedOrders.length}: ${nextOrder.customerName}`, 'info');
       
@@ -3926,6 +4211,15 @@ function setMode(mode) {
     outputBtn.classList.add('active');
   }
   
+  // GỬI LỆNH ĐẾN ESP32 ĐỂ CẬP NHẬT HIỂN THỊ LED
+  sendESP32Command('set_mode', {
+    mode: mode
+  }).then(() => {
+    console.log('✅ Mode changed to:', mode, '- ESP32 display updated');
+  }).catch(error => {
+    console.error('❌ Failed to update ESP32 mode:', error);
+  });
+  
   updateOverview();
 }
 
@@ -3946,7 +4240,7 @@ function addProduct() {
   }
   
   const newProduct = {
-    id: Date.now(),
+    id: productIdCounter++,
     code: productCode,
     name: productName
   };
@@ -4036,7 +4330,7 @@ function addOrder() {
   }
   
   const newOrder = {
-    id: Date.now(),
+    id: orderIdCounter++,
     orderNumber: currentOrders.length + 1,
     customerName,
     orderCode,
@@ -4075,7 +4369,7 @@ function saveOrder() {
     historyItem.innerHTML = `
       <h5>${item.orderCode} - ${item.productName}</h5>
       <p><i class="fas fa-user"></i> Khách hàng: ${item.customerName}</p>
-      <p><i class="fas fa-truck"></i> Xe: ${item.vehicleNumber}</p>
+      <p><i class="fas fa-truck"></i> Địa chỉ: ${item.vehicleNumber}</p>
       <p><i class="fas fa-calculator"></i> Số lượng: ${item.count}/${item.target}</p>
       <p><i class="fas fa-clock"></i> Thời gian: ${new Date(item.timestamp).toLocaleString('vi-VN')}</p>
     `;
@@ -4127,6 +4421,10 @@ function updateHistoryTableWithData(historyData) {
     // Kiểm tra xem có phải là batch không
     const isBatch = entry.isBatch || entry.customerName.includes('📦');
     
+    // Get product display with code + name
+    const product = currentProducts.find(p => p.name === entry.productName);
+    const productDisplay = product && product.code ? `${product.code} - ${product.name}` : (entry.productName || 'N/A');
+    
     row.innerHTML = `
       <td>${new Date(entry.timestamp).toLocaleString('vi-VN')}</td>
       <td>
@@ -4134,7 +4432,7 @@ function updateHistoryTableWithData(historyData) {
         ${entry.orderCode ? `<br><small style="color: #666;">Mã: ${entry.orderCode}</small>` : ''}
       </td>
       <td>${entry.vehicleNumber || 'N/A'}</td>
-      <td>${entry.productName}</td>
+      <td>${productDisplay}</td>
       <td><strong>${entry.plannedQuantity}</strong></td>
       <td>
         <span style="color: ${isAccurate ? 'green' : 'red'}; font-weight: bold;">
@@ -4270,6 +4568,63 @@ function saveSettings() {
   sendSettingsToESP32();
   
   updateOverview();
+}
+
+// Get device information (MAC address and MQTT topic)
+async function getDeviceInfo() {
+  try {
+    console.log('🔍 Getting device info from ESP32...');
+    
+    const response = await fetch('/api/device_info');
+    if (response.ok) {
+      const deviceInfo = await response.json();
+      console.log('✅ Device info received:', deviceInfo);
+      
+      // Update device code field (MAC Address với thông tin chi tiết)
+      const deviceCodeField = document.getElementById('deviceCode');
+      if (deviceCodeField) {
+        let macInfo = deviceInfo.deviceMAC || 'N/A';
+        if (deviceInfo.activeInterface === "Ethernet (W5500)" && deviceInfo.ethernetMAC) {
+          macInfo = `ESP32: ${deviceInfo.deviceMAC} | Ethernet: ${deviceInfo.ethernetMAC}`;
+        }
+        deviceCodeField.value = macInfo;
+      }
+      
+      // Update MQTT topic field
+      const mqttTopicField = document.getElementById('mqttTopic');
+      if (mqttTopicField) {
+        mqttTopicField.value = deviceInfo.mqttTopic || 'bagcounter/unknown';
+      }
+      
+      // Update conveyor name if available
+      if (deviceInfo.conveyorName) {
+        const conveyorNameField = document.getElementById('conveyorName');
+        if (conveyorNameField && !conveyorNameField.value) {
+          conveyorNameField.value = deviceInfo.conveyorName;
+        }
+      }
+      
+      console.log('✅ Device info populated successfully');
+      showNotification('Đã tải thông tin thiết bị thành công', 'success');
+    } else {
+      throw new Error('Failed to get device info');
+    }
+  } catch (error) {
+    console.error('❌ Error getting device info:', error);
+    
+    // Set default values when API fails
+    const deviceCodeField = document.getElementById('deviceCode');
+    const mqttTopicField = document.getElementById('mqttTopic');
+    
+    if (deviceCodeField) {
+      deviceCodeField.value = 'API không khả dụng - Vui lòng kiểm tra kết nối';
+    }
+    if (mqttTopicField) {
+      mqttTopicField.value = 'bagcounter/esp32_default';
+    }
+    
+    console.log('ℹ️ Device info set to default values due to API error');
+  }
 }
 
 // ESP32 Communication
@@ -4426,13 +4781,13 @@ function startStatusPolling() {
           lastIRTimestamp = data.lastIRTimestamp;
           
           if (data.lastIRCommand === 'START') {
-            console.log('IR Remote START - calling startCounting()');
+            // console.log('IR Remote START - calling startCounting()');
             startCounting();
           } else if (data.lastIRCommand === 'PAUSE') {
-            console.log('IR Remote PAUSE - calling pauseCounting()');
+            // console.log('IR Remote PAUSE - calling pauseCounting()');
             pauseCounting();
           } else if (data.lastIRCommand === 'RESET') {
-            console.log('IR Remote RESET - calling resetCounting()');
+            // console.log('IR Remote RESET - calling resetCounting()');
             resetCounting();
           }
           return;
@@ -5448,7 +5803,8 @@ window.debugMQTTConnection = function() {
 
 // ==================== PASSWORD AUTHENTICATION ====================
 
-const ADMIN_PASSWORD = "admin123"; // Change this to your desired password
+const ADMIN_PASSWORD = "kinhbac99"; // Password for product management
+const SETTINGS_PASSWORD = "kb666888"; // Password for WiFi and settings
 let authenticatedTabs = new Set();
 
 function showTab(tabName) {
@@ -5468,7 +5824,16 @@ function showPasswordModal(targetTab) {
   document.getElementById('passwordModal').style.display = 'block';
   document.getElementById('adminPassword').value = '';
   document.getElementById('passwordError').style.display = 'none';
-  document.getElementById('adminPassword').focus();
+  
+  // Set appropriate placeholder based on target tab
+  const passwordInput = document.getElementById('adminPassword');
+  if (targetTab === 'product') {
+    passwordInput.placeholder = 'Nhập mật khẩu ...';
+  } else if (targetTab === 'wifi' || targetTab === 'settings') {
+    passwordInput.placeholder = 'Nhập mật khẩu ...';
+  }
+  
+  passwordInput.focus();
   
   // Store target tab for after authentication
   document.getElementById('passwordModal').dataset.targetTab = targetTab;
@@ -5485,7 +5850,16 @@ function verifyPassword() {
   const password = document.getElementById('adminPassword').value;
   const targetTab = document.getElementById('passwordModal').dataset.targetTab;
   
-  if (password === ADMIN_PASSWORD) {
+  let isValidPassword = false;
+  
+  // Check password based on target tab
+  if (targetTab === 'product') {
+    isValidPassword = (password === ADMIN_PASSWORD);
+  } else if (targetTab === 'wifi' || targetTab === 'settings') {
+    isValidPassword = (password === SETTINGS_PASSWORD);
+  }
+  
+  if (isValidPassword) {
     authenticatedTabs.add(targetTab);
     closePasswordModal();
     showTabInternal(targetTab);
@@ -5527,6 +5901,12 @@ function showTabInternal(tabName) {
     case 'order':
       updateCurrentBatchSelect();
       break;
+    case 'settings':
+      // Auto-load device info when opening settings tab
+      setTimeout(() => {
+        getDeviceInfo();
+      }, 500); // Small delay to ensure tab is fully loaded
+      break;
   }
 }
 
@@ -5548,7 +5928,7 @@ function addProductItem() {
         <label>Tên mặt hàng:</label>
         <select class="productSelect" required>
           <option value="">Chọn sản phẩm</option>
-          ${currentProducts.map(p => `<option value="${p.name}">${p.name}</option>`).join('')}
+          ${currentProducts.map(p => `<option value="${p.name}">${p.code ? p.code + ' - ' + p.name : p.name}</option>`).join('')}
         </select>
       </div>
       <div class="form-group">
@@ -5591,7 +5971,7 @@ function addInitialProductItem() {
           <label>Tên mặt hàng:</label>
           <select class="productSelect" required>
             <option value="">Chọn sản phẩm</option>
-            ${currentProducts.map(p => `<option value="${p.name}">${p.name}</option>`).join('')}
+            ${currentProducts.map(p => `<option value="${p.name}">${p.code ? p.code + ' - ' + p.name : p.name}</option>`).join('')}
           </select>
         </div>
         <div class="form-group">
@@ -5618,7 +5998,7 @@ function addMultipleOrdersToBatch() {
   const vehicleNumber = document.getElementById('vehicleNumber').value.trim();
   
   if (!customerName || !orderCode || !vehicleNumber) {
-    showNotification('Vui lòng điền đầy đủ thông tin khách hàng, mã đơn hàng và biển số xe', 'error');
+    showNotification('Vui lòng điền đầy đủ thông tin khách hàng, mã đơn hàng và địa chỉ', 'error');
     return;
   }
   
@@ -5631,18 +6011,37 @@ function addMultipleOrdersToBatch() {
     const warningQuantity = item.querySelector('.warningQuantity');
     
     if (productSelect.value && quantity.value) {
-      orders.push({
-        id: Date.now() + Math.random(), // Unique ID
-        orderNumber: `${orderCode}-${orders.length + 1}`, // Order number based on orderCode
+      // Tìm product object hoàn chỉnh
+      const product = currentProducts.find(p => p.name === productSelect.value);
+      if (!product) {
+        showNotification(`Không tìm thấy sản phẩm: ${productSelect.value}`, 'error');
+        continue;
+      }
+      
+      // Kiểm tra xem sản phẩm này đã được thêm chưa
+      const existingOrder = orders.find(o => o.product.id === product.id);
+      if (existingOrder) {
+        showNotification(`Sản phẩm ${product.name} đã được thêm rồi`, 'warning');
+        continue;
+      }
+      
+      const newOrder = {
+        id: orderIdCounter++, // Simple incrementing ID
+        orderNumber: orders.length + 1, // Simple order number in batch
         customerName,
-        orderCode,
+        orderCode: orderCode, // GIỮ NGUYÊN mã đơn hàng như user nhập - KHÔNG auto-append số
         vehicleNumber,
-        productName: productSelect.value,
+        product: product, // Lưu object product hoàn chỉnh
+        productName: product.name, // Để tương thích
         quantity: parseInt(quantity.value),
         warningQuantity: parseInt(warningQuantity.value) || 5,
-        status: 'WAIT',
-        selected: true // Auto-select new orders
-      });
+        status: 'waiting',
+        selected: true, // Auto-select new orders
+        currentCount: 0,
+        createdAt: new Date().toISOString()
+      };
+      
+      orders.push(newOrder);
     }
   }
   
@@ -5656,15 +6055,24 @@ function addMultipleOrdersToBatch() {
     currentOrderBatch.push(order);
   });
   
+  // Gửi từng đơn hàng đến ESP32 để ESP32 biết
+  orders.forEach(async (order, index) => {
+    try {
+      await sendOrderToESP32(order);
+      console.log(`✅ Đã gửi đơn hàng ${order.orderCode} đến ESP32`);
+    } catch (error) {
+      console.error(`❌ Lỗi gửi đơn hàng ${order.orderCode} đến ESP32:`, error);
+    }
+  });
+  
   updateBatchPreview();
   resetOrderForm();
-  showNotification(`Đã thêm ${orders.length} đơn hàng vào danh sách`, 'success');
+  showNotification(`Đã thêm ${orders.length} đơn hàng vào danh sách và gửi đến ESP32`, 'success');
 }
 
 function resetOrderForm() {
-  document.getElementById('customerName').value = '';
+  // Chỉ xóa mã đơn hàng, giữ lại thông tin khách hàng và địa chỉ để dễ nhập đơn tiếp theo
   document.getElementById('orderCode').value = '';
-  document.getElementById('vehicleNumber').value = '';
   
   // Reset to one product item
   productItemCounter = 0;
@@ -5679,25 +6087,7 @@ function editOrder(index) {
   
   // Fill edit form
   document.getElementById('editOrderIndex').value = index;
-  document.getElementById('editCustomerName').value = order.customerName;
-  document.getElementById('editOrderCode').value = order.orderCode;
-  document.getElementById('editVehicleNumber').value = order.vehicleNumber;
   document.getElementById('editQuantity').value = order.quantity;
-  document.getElementById('editWarningQuantity').value = order.warningQuantity || 5;
-  
-  // Populate product select
-  const editProductSelect = document.getElementById('editProductSelect');
-  editProductSelect.innerHTML = '<option value="">Chọn sản phẩm</option>';
-  currentProducts.forEach(product => {
-    const option = document.createElement('option');
-    option.value = product.name;
-    option.textContent = product.name;
-    const orderProductName = order.product?.name || order.productName;
-    if (product.name === orderProductName) {
-      option.selected = true;
-    }
-    editProductSelect.appendChild(option);
-  });
   
   // Show modal
   document.getElementById('editOrderModal').style.display = 'block';
@@ -5733,7 +6123,9 @@ function saveEditOrder() {
   
   // Find active batch and update order
   const batch = orderBatches.find(b => b.isActive);
-  if (batch && batch.orders[index]) {
+  const batchIndex = orderBatches.findIndex(b => b.isActive);
+  
+  if (batch && batch.orders[index] && batchIndex !== -1) {
     const oldOrder = batch.orders[index];
     
     // Chỉ update số lượng
@@ -5746,10 +6138,11 @@ function saveEditOrder() {
     saveOrderBatches();
     
     // Send update to ESP32
-    sendOrderUpdateToESP32(batch.orders[index], index);
+    sendOrderUpdateToESP32(batch.orders[index], batchIndex);
     
     // Refresh display
     updateOrderTable();
+    updateOverview(); // Cập nhật số liệu tổng quan sau khi sửa
     closeEditOrderModal();
     showNotification('Đã cập nhật số lượng thành công', 'success');
   }
@@ -5761,16 +6154,20 @@ function deleteOrder(orderId) {
   }
   
   const batch = orderBatches.find(b => b.isActive);
-  if (batch) {
+  const batchIndex = orderBatches.findIndex(b => b.isActive);
+  
+  if (batch && batchIndex !== -1) {
     const orderIndex = batch.orders.findIndex(o => o.id === orderId);
     if (orderIndex !== -1) {
+      const orderToDelete = batch.orders[orderIndex];
       batch.orders.splice(orderIndex, 1);
       saveOrderBatches();
       
-      // Send delete to ESP32 with correct index
-      sendOrderDeleteToESP32(orderIndex);
+      // Send delete to ESP32 with order data and batch index
+      sendOrderDeleteToESP32(orderToDelete, batchIndex);
       
       updateOrderTable();
+      updateOverview(); // Cập nhật số liệu tổng quan sau khi xóa
       showNotification('Đã xóa đơn hàng', 'success');
     }
   }
@@ -5778,38 +6175,80 @@ function deleteOrder(orderId) {
 
 // ==================== ESP32 SYNC FUNCTIONS ====================
 
-async function sendOrderUpdateToESP32(order, index) {
+async function sendOrderUpdateToESP32(order, batchIndex) {
   try {
-    const response = await fetch('/api/order/update', {
+    const batches = JSON.parse(localStorage.getItem('orderBatches') || '[]');
+    const batch = batches[batchIndex];
+    
+    if (!batch) {
+      console.error('❌ Batch not found at index:', batchIndex);
+      return;
+    }
+    
+    const payload = {
+      cmd: 'UPDATE_ORDER',
+      batchId: batch.id,
+      orderId: order.id,
+      orderData: {
+        productCode: order.product?.code || '',
+        productName: order.product?.name || order.productName,
+        quantity: order.quantity,
+        bagType: order.bagType || ''
+      }
+    };
+    
+    console.log('🔄 Sending UPDATE_ORDER to ESP32:', payload);
+    
+    // Sử dụng endpoint đã có thay vì tạo endpoint mới
+    const response = await fetch('/api/cmd', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        index: index,
-        order: order
-      })
+      body: JSON.stringify(payload)
     });
     
     if (response.ok) {
-      console.log('✅ Order update sent to ESP32');
+      const result = await response.text();
+      console.log('✅ Order update sent to ESP32:', result);
     } else {
-      console.error('❌ Failed to send order update to ESP32');
+      const errorText = await response.text();
+      console.error('❌ Failed to send order update to ESP32:', response.status, errorText);
     }
   } catch (error) {
     console.error('❌ Error sending order update to ESP32:', error);
   }
 }
 
-async function sendOrderDeleteToESP32(index) {
+async function sendOrderDeleteToESP32(orderData, batchIndex) {
   try {
-    const response = await fetch('/api/orders?index=' + index, {
-      method: 'DELETE',
-      headers: { 'Content-Type': 'application/json' }
+    const batches = JSON.parse(localStorage.getItem('orderBatches') || '[]');
+    const batch = batches[batchIndex];
+    
+    if (!batch) {
+      console.error('❌ Batch not found at index:', batchIndex);
+      return;
+    }
+    
+    const payload = {
+      cmd: 'DELETE_ORDER',
+      batchId: batch.id,
+      orderId: orderData.id
+    };
+    
+    console.log('🗑️ Sending DELETE_ORDER to ESP32:', payload);
+    
+    // Sử dụng endpoint /api/cmd thay vì tạo endpoint mới
+    const response = await fetch('/api/cmd', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
     });
     
     if (response.ok) {
-      console.log('✅ Order delete sent to ESP32');
+      const result = await response.text();
+      console.log('✅ Order delete sent to ESP32:', result);
     } else {
-      console.error('❌ Failed to send order delete to ESP32');
+      const errorText = await response.text();
+      console.error('❌ Failed to send order delete to ESP32:', response.status, errorText);
     }
   } catch (error) {
     console.error('❌ Error sending order delete to ESP32:', error);
