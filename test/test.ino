@@ -309,7 +309,32 @@ void handleIRCommand(int button) {
       isTriggerEnabled = true;
       isCountingEnabled = true;
       currentSystemStatus = "RUNNING";
+      isRunning = true;
+      isTriggerEnabled = true;
+      isCountingEnabled = true;
+      currentSystemStatus = "RUNNING";
       action = "START";
+      
+      if (time(nullptr) > 24 * 3600) {
+        startTimeStr = getTimeStr();
+        timeWaitingForSync = false;
+      } else {
+        startTimeStr = "Waiting for time sync...";
+        timeWaitingForSync = true;
+      }
+      
+      // 🔄 CHỈ LOAD THÔNG TIN ĐƠN HÀNG HIỆN TẠI KHI CHƯA CÓ THÔNG TIN TỪ WEB
+      // Chỉ load từ ordersData nếu bagType trống (chưa được set từ web)
+      if (bagType.isEmpty()) {
+        loadCurrentOrderForDisplay();
+      }
+      
+      for (auto& cfg : bagConfigs) {
+        cfg.status = "RUNNING";
+      }
+      saveBagConfigsToFile();
+      updateStartLED();
+      needUpdate = true;
       
       if (time(nullptr) > 24 * 3600) {
         startTimeStr = getTimeStr();
@@ -333,11 +358,21 @@ void handleIRCommand(int button) {
       isTriggerEnabled = false;
       isCountingEnabled = false;
       currentSystemStatus = "PAUSE";
+      isRunning = false;
+      isTriggerEnabled = false;
+      isCountingEnabled = false;
+      currentSystemStatus = "PAUSE";
       action = "PAUSE";
       for (auto& cfg : bagConfigs) {
         cfg.status = "PAUSE";
       }
       saveBagConfigsToFile();
+      for (auto& cfg : bagConfigs) {
+        cfg.status = "PAUSE";
+      }
+      saveBagConfigsToFile();
+      updateStartLED();
+      needUpdate = true;
       updateStartLED();
       needUpdate = true;
       break;
@@ -348,12 +383,29 @@ void handleIRCommand(int button) {
       isLimitReached = false;
       isRunning = false;
       isTriggerEnabled = false;
+      totalCount = 0;
+      isLimitReached = false;
+      isRunning = false;
+      isTriggerEnabled = false;
+      isCountingEnabled = false;
+      history.clear();
+      startTimeStr = "";
+      timeWaitingForSync = false;
+      currentSystemStatus = "RESET";
       isCountingEnabled = false;
       history.clear();
       startTimeStr = "";
       timeWaitingForSync = false;
       currentSystemStatus = "RESET";
       action = "RESET";
+      
+      for (auto& cfg : bagConfigs) {
+        cfg.status = "RESET";
+      }
+      saveBagConfigsToFile();
+      updateStartLED();
+      updateDoneLED();
+      needUpdate = true;
       
       for (auto& cfg : bagConfigs) {
         cfg.status = "RESET";
@@ -479,7 +531,8 @@ void handleWebCommand(int button) {
         timeWaitingForSync = true;
       }
       
-      // 🔄 LOAD THÔNG TIN ĐƠN HÀNG HIỆN TẠI KHI IR REMOTE START
+      // 🔄 LUÔN LOAD THÔNG TIN ĐƠN HÀNG HIỆN TẠI KHI START
+      // Đảm bảo LED display luôn hiển thị đúng order info (cho cả Web và IR Remote)
       loadCurrentOrderForDisplay();
       
       for (auto& cfg : bagConfigs) {
@@ -1718,29 +1771,47 @@ void publishStatusMQTT() {
 }
 
 void publishCountUpdate() {
-  if (currentNetworkMode == WIFI_AP_MODE || !mqtt.connected()) return;
+  Serial.println("🔍 DEBUG publishCountUpdate: starting...");
+  
+  if (currentNetworkMode == WIFI_AP_MODE) {
+    Serial.println("🔍 DEBUG publishCountUpdate: skipped - AP mode");
+    return;
+  }
+  
+  if (!mqtt.connected()) {
+    Serial.println("🔍 DEBUG publishCountUpdate: skipped - MQTT not connected");
+    return;
+  }
   
   // Throttle count updates để tránh spam MQTT
   unsigned long now = millis();
   if (now - lastCountPublish < COUNT_PUBLISH_THROTTLE) {
+    Serial.println("🔍 DEBUG publishCountUpdate: skipped - throttled");
     return;
   }
   lastCountPublish = now;
+  
+  Serial.println("🔍 DEBUG publishCountUpdate: preparing message...");
   
   DynamicJsonDocument doc(256);
   doc["deviceId"] = conveyorName;  // ✅ SỬA: Sử dụng biến conveyorName thay vì chuỗi
   doc["count"] = totalCount;
   doc["target"] = targetCount;
   doc["type"] = bagType;
+  doc["productCode"] = productCode; // Thêm productCode để web dễ match
   doc["timestamp"] = getTimeStr();
   doc["progress"] = (float)totalCount / targetCount * 100;
   
   String message;
   serializeJson(doc, message);
   
+  Serial.println("🔍 DEBUG publishCountUpdate: message = " + message);
+  
   bool published = mqtt.publish(TOPIC_COUNT, message.c_str());
   if (published) {
     Serial.println("⚡ Count update published: " + String(totalCount) + "/" + String(targetCount));
+  } else {
+    Serial.println("❌ Count update publish FAILED!");
   }
 }
 
@@ -2880,10 +2951,17 @@ void setupWebServer() {
       
       // Tạo BagConfig mới từ đơn hàng - LUÔN LUÔN TẠO MỚI để cho phép nhiều đơn hàng cùng sản phẩm
       BagConfig newConfig;
-      newConfig.type = productName + "_" + orderCode; // Thêm orderCode để đảm bảo unique
+      // Sử dụng productCode thay vì orderCode để đảm bảo unique cho từng đơn hàng
+      String productCode = doc["product"]["code"].as<String>();
+      if (productCode.length() == 0) {
+        productCode = String(millis()); // Fallback nếu không có productCode
+      }
+      newConfig.type = productName + "_" + productCode; // Sử dụng productCode để unique
       newConfig.target = quantity;
       newConfig.warn = warningQuantity;
       newConfig.status = "WAIT";
+      
+      Serial.println("🆔 Created bagConfig with type: " + newConfig.type + " (productCode: " + productCode + ")");
       
       // LUÔN LUÔN THÊM MỚI - không kiểm tra trùng lặp để cho phép nhiều đơn hàng
       bagConfigs.push_back(newConfig);
@@ -3858,6 +3936,14 @@ void setupWebServer() {
       Serial.println("📊 Data size: " + String(jsonData.length()) + " chars");
       Serial.println("📄 Data preview (first 300 chars): " + jsonData.substring(0, min(300, (int)jsonData.length())));
       
+      // DEBUG: Print more of the data to see if there are different orders
+      if (jsonData.length() > 300) {
+        Serial.println("📄 Data continuation (chars 300-600): " + jsonData.substring(300, min(600, (int)jsonData.length())));
+      }
+      if (jsonData.length() > 600) {
+        Serial.println("📄 Data continuation (chars 600-900): " + jsonData.substring(600, min(900, (int)jsonData.length())));
+      }
+      
       // Limit data size to prevent memory overflow
       if (jsonData.length() > 8000) {  // Tăng từ 6000 lên 8000 bytes
         Serial.println("❌ Data too large, rejecting request");
@@ -3897,17 +3983,26 @@ void setupWebServer() {
           Serial.println("   - Batch ID: " + String(obj["id"].as<long>()));
           Serial.println("   - Batch name: " + obj["name"].as<String>());
           
-          // Check orders array
+          // Check orders array BEFORE copy
           if (obj.containsKey("orders") && obj["orders"].is<JsonArray>()) {
             JsonArray orders = obj["orders"];
             Serial.println("   - Orders count in this batch: " + String(orders.size()));
             
-            // Log first few orders
+            // Log first few orders FROM ORIGINAL JSON
+            Serial.println("   - DEBUG: Orders from ORIGINAL JSON:");
             for (size_t i = 0; i < min(3, (int)orders.size()); i++) {
               JsonObject order = orders[i];
-              Serial.println("     Order " + String(i + 1) + ": " + order["orderCode"].as<String>() + 
-                           " - " + order["productName"].as<String>() + 
-                           " - Qty: " + String(order["quantity"].as<int>()));
+              String orderCode = order["orderCode"].as<String>();
+              String productName = order["productName"].as<String>();
+              String productCode = "";
+              if (order.containsKey("product") && order["product"].containsKey("code")) {
+                productCode = order["product"]["code"].as<String>();
+              }
+              int quantity = order["quantity"].as<int>();
+              
+              Serial.println("     Order " + String(i + 1) + ": orderCode=" + orderCode + 
+                           ", productName=" + productName + ", productCode=" + productCode +
+                           ", qty=" + String(quantity));
             }
           } else {
             Serial.println("   - No orders array found or empty!");
@@ -3915,6 +4010,26 @@ void setupWebServer() {
           
           JsonObject newBatch = ordersData.createNestedObject();
           copyJsonObject(obj, newBatch);
+          
+          // CHECK orders array AFTER copy
+          if (newBatch.containsKey("orders") && newBatch["orders"].is<JsonArray>()) {
+            JsonArray copiedOrders = newBatch["orders"];
+            Serial.println("   - DEBUG: Orders AFTER copy to ordersData:");
+            for (size_t i = 0; i < min(3, (int)copiedOrders.size()); i++) {
+              JsonObject copiedOrder = copiedOrders[i];
+              String orderCode = copiedOrder["orderCode"].as<String>();
+              String productName = copiedOrder["productName"].as<String>();
+              String productCode = "";
+              if (copiedOrder.containsKey("product") && copiedOrder["product"].containsKey("code")) {
+                productCode = copiedOrder["product"]["code"].as<String>();
+              }
+              int quantity = copiedOrder["quantity"].as<int>();
+              
+              Serial.println("     Copied Order " + String(i + 1) + ": orderCode=" + orderCode + 
+                           ", productName=" + productName + ", productCode=" + productCode +
+                           ", qty=" + String(quantity));
+            }
+          }
           
           // Feed watchdog every few batches to prevent timeout
           if (++batchCount % 2 == 0) {
@@ -4352,7 +4467,7 @@ void updateDisplay() {
   }
   
   // 📍 DÒNG 1: Mã sản phẩm bên trái (Size 2)
-  dma_display->setTextSize(2);
+  dma_display->setTextSize(1.2);
   dma_display->setTextColor(myYELLOW);
   dma_display->setCursor(1, 2);
   
@@ -4386,9 +4501,9 @@ void updateDisplay() {
   // Hiển thị prefix theo mode và số lượng kế hoạch của đơn hàng hiện tại
   String line2;
   if (currentMode == "output") {
-    line2 = "X :" + String(targetCount);  // XUẤT mode
+    line2 = "X:" + String(targetCount);  // XUẤT mode
   } else {
-    line2 = "N :" + String(targetCount);  // NHẬP mode
+    line2 = "N:" + String(targetCount);  // NHẬP mode
   }
   dma_display->print(line2);
   
@@ -4461,8 +4576,11 @@ void setSystemConnected() {
 }
 
 void updateCount() {
+  Serial.println("🔍 DEBUG updateCount: called, isLimitReached=" + String(isLimitReached));
+  
   if (!isLimitReached) {
     totalCount++;
+    Serial.println("🔍 DEBUG updateCount: incremented totalCount to " + String(totalCount));
     
     // Cập nhật executeCount trong ordersData cho đơn hàng hiện tại
     JsonArray ordersArray = ordersData.as<JsonArray>();
@@ -4556,86 +4674,126 @@ void updateCount() {
         orderCompleteTime = 0;
         Serial.println("🔌 RELAY DELAY STATE CLEARED");
         
-        //  CHỈ RESET ĐƠN HÀNG HIỆN TẠI trong bagConfigs
-        for (auto& cfg : bagConfigs) {
-          if (cfg.type == completedOrderType) {
-            cfg.status = "COMPLETED";  // Đánh dấu hoàn thành, không xóa
-            Serial.println("✅ Order '" + completedOrderType + "' marked as COMPLETED");
-            break;
-          }
-        }
+        // Mark order as completed in ordersData (bagConfigs will sync automatically)
+        Serial.println("✅ Order '" + completedOrderType + "' marked as COMPLETED");
         
-        //  TỰ ĐỘNG CHUYỂN SANG ĐƠN HÀNG TIẾP THEO (nếu có)
+        //  TỰ ĐỘNG CHUYỂN SANG ĐƠN HÀNG TIẾP THEO THEO ORDER NUMBER
         bool foundNextOrder = false;
-        Serial.println("🔍 Searching for next order in queue...");
+        Serial.println("🔍 Searching for next order by orderNumber...");
         
-        // Debug: In ra tất cả đơn hàng hiện tại
-        for (auto& cfg : bagConfigs) {
-          Serial.println("   Order: " + cfg.type + " | Status: " + cfg.status + " | Target: " + String(cfg.target));
-        }
+        // Tìm orderNumber hiện tại từ ordersData
+        int currentOrderNumber = 0;
+        String currentBatchIdStr = "";
         
-        for (auto& cfg : bagConfigs) {
-          if (cfg.status == "WAIT" || cfg.status == "SELECTED" || (cfg.status == "RUNNING" && cfg.type != completedOrderType)) {
-            // Chuyển sang đơn hàng tiếp theo và TIẾP TỤC CHẠY
-            bagType = cfg.type;
-            targetCount = cfg.target;
-            cfg.status = "COUNTING";  // Chuyển trạng thái thành COUNTING
-            totalCount = 0;  // Reset số lượng về 0 cho đơn mới
-            
-            // GIỮ NGUYÊN trạng thái running - không set lại
-            // isRunning, isTriggerEnabled, isCountingEnabled giữ nguyên
-            isLimitReached = false;
-            
-            foundNextOrder = true;
-            
-            Serial.println("🎯 Auto switched to next order: " + bagType);
-            Serial.println("   Target: " + String(targetCount) + " bags");
-            Serial.println("   Count reset to 0, continue running");
-            break;
-          }
-        }
-        
-        if (!foundNextOrder) {
-          // Không còn đơn hàng nào -> Tìm đơn hàng đầu tiên để lặp lại
-          Serial.println("ℹ️ No more orders in queue - searching for first order to restart");
+        // Duyệt ordersData để tìm đơn hàng hiện tại đang đếm
+        for (size_t i = 0; i < ordersData.size(); i++) {
+          JsonArray orders = ordersData[i]["orders"];
+          currentBatchIdStr = ordersData[i]["id"].as<String>();
           
-          // Tìm đơn hàng đầu tiên để restart cycle
-          for (auto& cfg : bagConfigs) {
-            if (cfg.type != completedOrderType) {  // Không chọn đơn vừa hoàn thành
-              bagType = cfg.type;
-              targetCount = cfg.target;
-              cfg.status = "COUNTING";
-              totalCount = 0;
+          for (size_t j = 0; j < orders.size(); j++) {
+            JsonObject order = orders[j];
+            String status = order["status"].as<String>();
+            bool selected = order["selected"] | false;
+            
+            if (status == "counting" && selected) {
+              currentOrderNumber = order["orderNumber"] | 0;
+              Serial.println("📍 Current order found: orderNumber=" + String(currentOrderNumber));
+              break;
+            }
+          }
+          if (currentOrderNumber > 0) break;
+        }
+        
+        // Tìm đơn hàng tiếp theo (orderNumber + 1) trong các đơn được chọn
+        int nextOrderNumber = currentOrderNumber + 1;
+        Serial.println("🔍 Looking for next order with orderNumber=" + String(nextOrderNumber));
+        
+        for (size_t i = 0; i < ordersData.size(); i++) {
+          JsonArray orders = ordersData[i]["orders"];
+          
+          for (size_t j = 0; j < orders.size(); j++) {
+            JsonObject order = orders[j];
+            int orderNumber = order["orderNumber"] | 0;
+            bool selected = order["selected"] | false;
+            String status = order["status"].as<String>();
+            
+            // Tìm đơn có orderNumber tiếp theo và được chọn
+            if (orderNumber == nextOrderNumber && selected && status != "completed") {
+              // CẬP NHẬT THÔNG TIN ĐƠN MỚI
+              String productName = order["productName"].as<String>();
+              String newProductCode = "";
+              if (order.containsKey("product") && order["product"].containsKey("code")) {
+                newProductCode = order["product"]["code"].as<String>();
+              }
+              int quantity = order["quantity"] | 1;
               
-              // GIỮ NGUYÊN trạng thái running
+              // Cập nhật trạng thái đơn cũ thành completed
+              for (size_t x = 0; x < ordersData.size(); x++) {
+                JsonArray oldOrders = ordersData[x]["orders"];
+                for (size_t y = 0; y < oldOrders.size(); y++) {
+                  JsonObject oldOrder = oldOrders[y];
+                  if (oldOrder["orderNumber"] == currentOrderNumber && oldOrder["selected"]) {
+                    oldOrder["status"] = "completed";
+                    break;
+                  }
+                }
+              }
+              
+              // Cập nhật trạng thái đơn mới thành counting
+              order["status"] = "counting";
+              
+              // CẬP NHẬT BIẾN HIỂN THỊ
+              bagType = productName;
+              productCode = newProductCode;
+              targetCount = quantity;
+              totalCount = 0;  // Reset số đếm về 0
               isLimitReached = false;
               
               foundNextOrder = true;
               
-              Serial.println("🔄 Restarted cycle with first order: " + bagType);
-              Serial.println("   Target: " + String(targetCount) + " bags");
+              Serial.println("🎯 Auto switched to next order:");
+              Serial.println("   OrderNumber: " + String(nextOrderNumber));
+              Serial.println("   ProductName: " + productName);
+              Serial.println("   ProductCode: " + newProductCode);
+              Serial.println("   Target: " + String(quantity) + " bags");
               Serial.println("   Count reset to 0, continue running");
+              
+              // Lưu thay đổi vào file
+              saveOrdersToFile();
               break;
             }
           }
+          if (foundNextOrder) break;
+        }
+        
+        if (!foundNextOrder) {
+          // Không còn đơn hàng nào tiếp theo → DỪNG HẾT, KHÔNG RESTART
+          Serial.println("ℹ️ No more orders in current batch - All orders completed!");
+          Serial.println("� Stopping system - Use batchSelector to choose next batch");
           
-          // Nếu vẫn không tìm thấy, giữ nguyên đơn cuối
-          if (!foundNextOrder) {
-            Serial.println("ℹ️ Only one order available - staying on completed order");
-            bagType = completedOrderType;
-            targetCount = 0;  // Set target = 0 để báo hiệu hoàn thành hết
-          }
+          // DỪNG HOÀN TOÀN hệ thống
+          isRunning = false;
+          isTriggerEnabled = false;
+          isCountingEnabled = false;
+          
+          // Reset count về 0
+          totalCount = 0;
+          isLimitReached = true; // Đánh dấu đã hoàn thành
+          
+          // Thông báo hoàn thành batch
+          publishAlert("BATCH_COMPLETED", "Hoàn thành tất cả đơn hàng trong batch hiện tại!");
+          
+          Serial.println("✅ Batch completed - System stopped. Please select new batch to continue.");
         } else {
-          // Load thông tin đơn hàng mới lên LED display
+          // Đã tìm thấy đơn tiếp theo - gửi thông tin lên web
           loadCurrentOrderForDisplay();
-          
-          // Gửi thông tin đơn hàng mới lên web ngay lập tức
           publishCountUpdate();
           publishBagConfigs();
           
           Serial.println("📡 Sent new order info to web interface");
         }
         
+        // Keep bagConfigs sync for legacy compatibility
         saveBagConfigsToFile();
         updateStartLED();
         updateDoneLED();
@@ -4674,12 +4832,23 @@ void updateCount() {
             cfg.status = "COUNTING";
             totalCount = 0;
             
+            // CẬP NHẬT PRODUCT CODE từ bagType (cho manual mode)
+            int underscorePos = bagType.lastIndexOf('_');
+            if (underscorePos > 0) {
+              String productName = bagType.substring(0, underscorePos);
+              productCode = bagType.substring(underscorePos + 1);
+              Serial.println("📦 Manual - Extracted: productName='" + productName + "', productCode='" + productCode + "'");
+            } else {
+              productCode = "1"; // Fallback
+            }
+            
             // GIỮ NGUYÊN trạng thái running
             isLimitReached = false;
             
             foundNextOrder = true;
             
             Serial.println("🎯 Manual switched to next order: " + bagType);
+            Serial.println("   ProductCode: " + productCode);
             Serial.println("   Count reset to 0, continue running");
             loadCurrentOrderForDisplay();
             publishCountUpdate();

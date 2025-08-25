@@ -92,7 +92,18 @@ document.addEventListener('DOMContentLoaded', async function() {
   setTimeout(() => {
     getDeviceInfo();
   }, 2000);
-  
+
+  // Setup WiFi Static IP toggle
+  const useStaticIPCheckbox = document.getElementById('useStaticIP');
+  if (useStaticIPCheckbox) {
+    useStaticIPCheckbox.addEventListener('change', function() {
+      const staticIPConfig = document.getElementById('staticIPConfig');
+      if (staticIPConfig) {
+        staticIPConfig.style.display = this.checked ? 'block' : 'none';
+      }
+    });
+  }
+
   console.log('✅ Application initialized successfully');
   // showNotification('Ứng dụng đã khởi tạo (MQTT Real-time mode)', 'success');
 });
@@ -201,7 +212,8 @@ async function loadProductsFromESP32() {
       if (esp32Products && esp32Products.length > 0) {
         currentProducts = esp32Products;
         localStorage.setItem('products', JSON.stringify(currentProducts));
-        console.log('Products loaded from ESP32:', esp32Products.length, 'products');
+        console.log('✅ Products loaded from ESP32:', esp32Products.length, 'products');
+        console.log('🔍 DEBUG: Loaded products:', currentProducts);
         return true;
       }
     }
@@ -859,74 +871,152 @@ async function updateDeviceStatus(data) {
   updateDisplayElements(data);
 }
 
+let handleCountUpdateRunning = false;
+
 async function handleCountUpdate(data) {
-  console.log('⚡ MQTT Real-time count:', data.count, 'type:', data.type, 'progress:', data.progress + '%');
+  // Tránh infinite loop
+  if (handleCountUpdateRunning) {
+    console.log('⚠️ handleCountUpdate already running, skipping...');
+    return;
+  }
   
-  // ⚡ MQTT-ONLY REAL-TIME COUNT UPDATE - No API fallback to prevent overwrites
-  if (data.count !== undefined) {
-    const activeBatch = orderBatches.find(b => b.isActive);
-    if (activeBatch && countingState.isActive) {
-      const selectedOrders = activeBatch.orders.filter(o => o.selected);
-      const currentOrderIndex = selectedOrders.findIndex(o => o.status === 'counting');
+  handleCountUpdateRunning = true;
+  
+  try {
+    console.log('⚡ MQTT Real-time count:', data.count, 'type:', data.type, 'productCode:', data.productCode, 'progress:', data.progress + '%');
+
+    // ⚡ MQTT-ONLY REAL-TIME COUNT UPDATE - No API fallback to prevent overwrites
+    if (data.count !== undefined) {
+    // Tìm đơn hàng đang được ESP32 đếm theo product type/name
+    let foundOrder = null;
+    let foundBatch = null;
+    let foundOrderIndex = -1;
+    
+    // Tìm trong TẤT CẢ batches, không chỉ activeBatch
+    for (let batch of orderBatches) {
+      const selectedOrders = batch.orders.filter(o => o.selected);
       
-      if (currentOrderIndex >= 0) {
-        const currentOrder = selectedOrders[currentOrderIndex];
-        const totalCountFromDevice = data.count;
+      console.log(`🔍 Checking batch ${batch.name} - orders:`, selectedOrders.map(o => `${o.productName}(${o.status})`));
+      
+      for (let i = 0; i < selectedOrders.length; i++) {
+        const order = selectedOrders[i];
         
-        // Tính số đếm đã hoàn thành từ các đơn hàng trước đó
-        let completedCount = 0;
-        for (let i = 0; i < currentOrderIndex; i++) {
-          if (selectedOrders[i].status === 'completed') {
-            completedCount += selectedOrders[i].quantity;
+        // Match theo nhiều cách để đảm bảo tìm đúng
+        const productMatches = (
+          order.productName === data.type || 
+          (order.product && order.product.name === data.type) ||
+          (order.product && order.product.code === data.type) ||
+          (data.productCode && order.product && order.product.code === data.productCode) ||
+          order.status === 'counting'
+        );
+        
+        console.log(`🔍 Order ${i+1}: ${order.productName} - status:${order.status} - matches:${productMatches}`);
+        
+        if (productMatches && (order.status === 'counting' || order.status === 'waiting')) {
+          // Nếu ESP32 đang gửi count cho đơn này mà chưa có status counting, tự động set
+          if (order.status === 'waiting' && data.count > 0) {
+            console.log(`🔄 Auto-setting order ${order.productName} to counting status`);
+            order.status = 'counting';
+            
+            // Đảm bảo các đơn khác không còn status counting
+            selectedOrders.forEach((otherOrder, otherIdx) => {
+              if (otherIdx !== i && otherOrder.status === 'counting') {
+                otherOrder.status = 'completed';
+              }
+            });
           }
+          
+          foundOrder = order;
+          foundBatch = batch;
+          foundOrderIndex = i;
+          
+          console.log(`🎯 Found counting order: ${order.productName} (${order.product?.code}) in batch ${batch.name}`);
+          break;
+        }
+      }
+      if (foundOrder) break;
+    }
+    
+    if (foundOrder && foundBatch) {
+      const totalCountFromDevice = data.count;
+      
+      // ESP32 GỬI COUNT RIÊNG CHO TỪNG ĐƠN (KHÔNG TÍCH LŨY)
+      // Khi ESP32 chuyển đơn, nó reset count về 0 cho đơn mới
+      // Vì vậy data.count chính là currentCount của đơn hiện tại
+      const calculatedCurrentCount = totalCountFromDevice;
+      const newCurrentCount = Math.min(calculatedCurrentCount, foundOrder.quantity);
+      
+      // Chỉ cập nhật nếu số mới lớn hơn
+      if (newCurrentCount >= (foundOrder.currentCount || 0)) {
+        const oldCount = foundOrder.currentCount || 0;
+        foundOrder.currentCount = newCurrentCount;
+        
+        // Cập nhật activeBatch nếu cần
+        if (!foundBatch.isActive) {
+          console.log(`📋 Switching active batch to: ${foundBatch.name}`);
+          orderBatches.forEach(b => b.isActive = false);
+          foundBatch.isActive = true;
         }
         
-        // Số đếm hiện tại của đơn hàng
-        const calculatedCurrentCount = Math.max(0, totalCountFromDevice - completedCount);
-        const newCurrentCount = Math.min(calculatedCurrentCount, currentOrder.quantity);
+        // Tính tổng count cho batch (số đã hoàn thành + đang đếm)
+        const selectedOrders = foundBatch.orders.filter(o => o.selected);
+        let batchTotalCount = 0;
+        for (let order of selectedOrders) {
+          batchTotalCount += order.currentCount || 0;
+        }
         
-        // Chỉ cập nhật nếu số mới lớn hơn
-        if (newCurrentCount >= (currentOrder.currentCount || 0)) {
-          const oldCount = currentOrder.currentCount || 0;
-          currentOrder.currentCount = newCurrentCount;
-          countingState.totalCounted = totalCountFromDevice;
-          
-          console.log(`⚡ Real-time: Đơn ${currentOrderIndex + 1} (${currentOrder.customerName}): ${oldCount} → ${newCurrentCount}/${currentOrder.quantity}`);
-          
-          // ⚡ REAL-TIME UI UPDATE - không save to ESP32
-          updateOrderTable();
+        // Cập nhật counting state
+        countingState.isActive = true;
+        countingState.totalCounted = batchTotalCount; // Tổng thực tế của batch
+        countingState.currentOrderIndex = foundOrderIndex;
+        
+        // console.log(`⚡ Real-time: ${foundBatch.name} - Đơn ${foundOrderIndex + 1} (${foundOrder.productName}): ${oldCount} → ${newCurrentCount}/${foundOrder.quantity}`);
+        
+        // ⚡ REAL-TIME UI UPDATE (throttled)
+        updateOrderTable();
+        
+        // Chỉ update overview nếu count thực sự thay đổi
+        if (oldCount !== newCurrentCount) {
           updateOverview();
+        }
+        
+        // Kiểm tra hoàn thành đơn hàng
+        if (foundOrder.currentCount >= foundOrder.quantity) {
+          foundOrder.currentCount = foundOrder.quantity;
+          foundOrder.status = 'completed';
           
-          // Kiểm tra hoàn thành đơn hàng
-          if (currentOrder.currentCount >= currentOrder.quantity) {
-            currentOrder.currentCount = currentOrder.quantity;
-            currentOrder.status = 'completed';
-            
-            console.log(`✅ Hoàn thành đơn ${currentOrderIndex + 1}: ${currentOrder.customerName}`);
-            
-            // Tìm đơn hàng tiếp theo
-            const nextOrderIndex = selectedOrders.findIndex((o, idx) => 
-              idx > currentOrderIndex && o.status === 'waiting'
-            );
-            
-            if (nextOrderIndex >= 0) {
-              selectedOrders[nextOrderIndex].status = 'counting';
-              countingState.currentOrderIndex = nextOrderIndex;
-              console.log(`▶️ Chuyển sang đơn ${nextOrderIndex + 1}: ${selectedOrders[nextOrderIndex].customerName}`);
-            } else {
-              console.log('🎉 Hoàn thành tất cả đơn hàng trong batch!');
-              countingState.isActive = false;
-            }
-            
-            // Chỉ save khi có thay đổi status quan trọng
-            saveOrderBatches();
-            setTimeout(() => updateOrderTable(), 100); // Defer UI update
+          console.log(`✅ Hoàn thành đơn ${foundOrderIndex + 1}: ${foundOrder.productName} trong batch ${foundBatch.name}`);
+          
+          // Tìm đơn hàng tiếp theo trong cùng batch
+          const nextOrder = selectedOrders.find((o, idx) => 
+            idx > foundOrderIndex && o.status === 'waiting'
+          );
+          
+          if (nextOrder) {
+            nextOrder.status = 'counting';
+            console.log(`▶️ Chuyển sang đơn tiếp theo: ${nextOrder.productName}`);
+          } else {
+            console.log(`🎉 Hoàn thành tất cả đơn hàng trong batch ${foundBatch.name}!`);
+            countingState.isActive = false;
           }
+          
+          // Save changes
+          saveOrderBatches();
+          setTimeout(() => updateOrderTable(), 100);
         }
       }
     } else {
-      console.log('⚠️ Received count update but no active batch or not counting');
+      console.log(`⚠️ Không tìm thấy đơn hàng đang đếm cho product: ${data.type}`);
+      console.log('Available orders:');
+      orderBatches.forEach(batch => {
+        console.log(`  Batch ${batch.name}:`, batch.orders.map(o => `${o.productName}(${o.status})`));
+      });
     }
+  }
+  } catch (error) {
+    console.error('Error in handleCountUpdate:', error);
+  } finally {
+    handleCountUpdateRunning = false;
   }
 }
 
@@ -2174,7 +2264,7 @@ async function startCounting() {
   console.log('Current orderBatches:', orderBatches);
   
   let activeBatch = orderBatches.find(b => b.isActive);
-  console.log('Active batch:', activeBatch);
+  // console.log('Active batch:', activeBatch);
   
   // Nếu không có batch active, thử active batch đầu tiên có orders
   if (!activeBatch && orderBatches.length > 0) {
@@ -2277,6 +2367,9 @@ async function startCounting() {
   
   console.log('Sending batch info to ESP32:', batchInfo);
   
+  // ⚡ CẬP NHẬT UI NGAY LẬP TỨC TRƯỚC KHI GỬI COMMAND
+  updateUIForStart();
+  
   try {
     // Try MQTT first for real-time commands
     if (mqttConnected && startCountingMQTT()) {
@@ -2306,7 +2399,7 @@ async function startCounting() {
     
     console.log('✅ Sent current order info to ESP32 for LED display:', productCode, productName);
     
-    updateUIForStart(); // Cập nhật UI state
+    // updateUIForStart(); // Đã di chuyển lên trên
     saveOrderBatches();
     updateOrderTable();
     updateOverview();
@@ -2323,6 +2416,10 @@ async function pauseCounting() {
   console.log('⏸ Pausing counting...');
   console.log('MQTT connected:', mqttConnected);
   
+  // ⚡ CẬP NHẬT UI NGAY LẬP TỨC
+  updateUIForPause();
+  countingState.isActive = false;
+  
   try {
     // Try MQTT first for real-time commands
     if (mqttConnected && pauseCountingMQTT()) {
@@ -2333,7 +2430,7 @@ async function pauseCounting() {
       await sendESP32Command('pause');
     }
     
-    updateUIForPause(); // Cập nhật UI state
+    // updateUIForPause(); // Đã di chuyển lên trên
     countingState.isActive = false;
     
     // � MANUAL UPDATE ORDERS TRƯỚC KHI REFRESH
@@ -2374,6 +2471,12 @@ async function resetCounting() {
     return;
   }
   
+  // ⚡ CẬP NHẬT UI VÀ STATE NGAY LẬP TỨC
+  countingState.isActive = false;
+  countingState.currentOrderIndex = 0;
+  countingState.totalCounted = 0;
+  updateUIForReset();
+  
   try {
     // Try MQTT first for real-time commands
     if (mqttConnected && resetCountingMQTT()) {
@@ -2384,7 +2487,7 @@ async function resetCounting() {
       await sendESP32Command('reset');
     }
     
-    // Reset local state
+    // Reset local state - đã di chuyển lên trên
     countingState.isActive = false;
     countingState.currentOrderIndex = 0;
     countingState.totalCounted = 0;
@@ -2406,7 +2509,7 @@ async function resetCounting() {
     saveOrderBatches();
     updateOrderTable();
     updateOverview();
-    updateUIForReset(); // Thêm dòng này để update UI state
+    // updateUIForReset(); // Đã di chuyển lên trên
     
     console.log('✅ Reset completed - all orders set to WAITING');
     // showNotification('✅ Đã reset hệ thống về trạng thái chờ', 'success');
@@ -2658,6 +2761,7 @@ function updateProductSelect() {
     option.value = product.id;
     option.textContent = product.code ? `${product.code} - ${product.name}` : product.name;
     select.appendChild(option);
+    consolele.log('Added product to select:', option.value, option.textContent);
   });
 }
 
@@ -2680,7 +2784,9 @@ function updateAllProductSelects() {
   
   // Cập nhật tất cả dropdown trong form multi-order
   const allProductSelects = document.querySelectorAll('.productSelect');
-  allProductSelects.forEach(select => {
+  console.log('🔍 DEBUG: Updating', allProductSelects.length, 'multi-order selects');
+  
+  allProductSelects.forEach((select, index) => {
     const currentValue = select.value;
     select.innerHTML = '<option value="">Chọn sản phẩm</option>';
     
@@ -2695,6 +2801,8 @@ function updateAllProductSelects() {
     if (currentValue) {
       select.value = currentValue;
     }
+    
+    console.log(`✅ DEBUG: Select ${index} updated with ${currentProducts.length} products, current value:`, currentValue);
   });
 }
 
@@ -2705,38 +2813,38 @@ function debugBatchData() {
   // console.log('Number of batches:', orderBatches.length);
   
   orderBatches.forEach((batch, index) => {
-    console.log(`Batch ${index}:`, {
-      id: batch.id,
-      name: batch.name,
-      isActive: batch.isActive,
-      orders: batch.orders.length,
-      ordersData: batch.orders
-    });
+    // console.log(`Batch ${index}:`, {
+    //   id: batch.id,
+    //   name: batch.name,
+    //   isActive: batch.isActive,
+    //   orders: batch.orders.length,
+    //   ordersData: batch.orders
+    // });
     
     if (batch.orders.length > 0) {
       batch.orders.forEach((order, oIndex) => {
-        console.log(`  Order ${oIndex}:`, 
-          {
-          selected: order.selected,
-          quantity: order.quantity,
-          currentCount: order.currentCount || 0
-        });
+        // console.log(`  Order ${oIndex}:`, 
+        //   {
+        //   selected: order.selected,
+        //   quantity: order.quantity,
+        //   currentCount: order.currentCount || 0
+        // });
       });
     }
   });
   
   const activeBatch = orderBatches.find(b => b.isActive);
-  console.log('Active batch:', activeBatch ? activeBatch.name : 'NONE FOUND');
-  console.log('========================');
+  // console.log('Active batch:', activeBatch ? activeBatch.name : 'NONE FOUND');
+  // console.log('========================');
 }
 
 // Updated Overview Function
 function updateOverview() {
-  console.log('Updating overview, orderBatches:', orderBatches.length);
-  debugBatchData(); // Debug call
+  // console.log('Updating overview, orderBatches:', orderBatches.length);
+  // debugBatchData(); // Debug call
   
   const activeBatch = orderBatches.find(b => b.isActive);
-  console.log('Active batch:', activeBatch ? activeBatch.name : 'none');
+  // console.log('Active batch:', activeBatch ? activeBatch.name : 'none');
   
   // Update plan vs execute counts
   const planCountElement = document.getElementById('planCount');
@@ -2753,7 +2861,7 @@ function updateOverview() {
   const totalPlanned = selectedOrders.reduce((sum, order) => sum + order.quantity, 0);
   const totalCounted = selectedOrders.reduce((sum, order) => sum + (order.currentCount || 0), 0);
   
-  console.log('Orders:', orders.length, 'Selected:', selectedOrders.length, 'Planned:', totalPlanned, 'Counted:', totalCounted);
+  // console.log('Orders:', orders.length, 'Selected:', selectedOrders.length, 'Planned:', totalPlanned, 'Counted:', totalCounted);
   
   if (planCountElement) planCountElement.textContent = totalPlanned;
   if (executeCountElement) executeCountElement.textContent = totalCounted;
@@ -3098,7 +3206,7 @@ function saveOrderBatches() {
   try {
     // Lưu vào localStorage
     localStorage.setItem('orderBatches', JSON.stringify(orderBatches));
-    console.log('📋 Saved', orderBatches.length, 'batches to localStorage');
+    // console.log('📋 Saved', orderBatches.length, 'batches to localStorage');
     
     // Không tự động gửi ESP32 ở đây để tránh spam, chỉ gửi khi cần
     
@@ -3738,12 +3846,12 @@ async function updateStatusFromDevice(data) {
         const totalCountFromDevice = data.count;
         
         // Debug: Log thông tin đơn hàng hiện tại
-        console.log(`🔍 DEBUG - Đơn ${currentOrderIndex + 1}:`, {
-          customerName: currentOrder.customerName,
-          quantity: currentOrder.quantity,
-          currentCount: currentOrder.currentCount,
-          status: currentOrder.status
-        });
+        // console.log(`🔍 DEBUG - Đơn ${currentOrderIndex + 1}:`, {
+        //   customerName: currentOrder.customerName,
+        //   quantity: currentOrder.quantity,
+        //   currentCount: currentOrder.currentCount,
+        //   status: currentOrder.status
+        // });
         
         // Tính số đếm đã hoàn thành từ các đơn hàng trước đó (THEO THỨ TỰ)
         let completedCount = 0;
@@ -3751,7 +3859,7 @@ async function updateStatusFromDevice(data) {
           // Đối với đơn đã completed, cộng đúng số quantity
           if (selectedOrders[i].status === 'completed') {
             completedCount += selectedOrders[i].quantity;
-            console.log(`🔍 DEBUG - Đơn ${i + 1} đã hoàn thành: ${selectedOrders[i].quantity} bao`);
+            // console.log(`🔍 DEBUG - Đơn ${i + 1} đã hoàn thành: ${selectedOrders[i].quantity} bao`);
           }
         }
         
@@ -3766,23 +3874,23 @@ async function updateStatusFromDevice(data) {
           currentOrder.currentCount = newCurrentCount;
         }
         
-        console.log(`🔍 DEBUG - Tính toán chi tiết:`, {
-          currentOrderIndex: currentOrderIndex,
-          totalFromESP32: totalCountFromDevice,
-          completedCountFromPreviousOrders: completedCount,
-          calculatedCurrentCount: calculatedCurrentCount,
-          currentOrder_oldCurrentCount: currentOrder.currentCount || 0,
-          currentOrder_newCurrentCount: newCurrentCount,
-          currentOrder_targetQuantity: currentOrder.quantity,
-          willUpdate: newCurrentCount >= (currentOrder.currentCount || 0)
-        });
+        // console.log(`🔍 DEBUG - Tính toán chi tiết:`, {
+        //   currentOrderIndex: currentOrderIndex,
+        //   totalFromESP32: totalCountFromDevice,
+        //   completedCountFromPreviousOrders: completedCount,
+        //   calculatedCurrentCount: calculatedCurrentCount,
+        //   currentOrder_oldCurrentCount: currentOrder.currentCount || 0,
+        //   currentOrder_newCurrentCount: newCurrentCount,
+        //   currentOrder_targetQuantity: currentOrder.quantity,
+        //   willUpdate: newCurrentCount >= (currentOrder.currentCount || 0)
+        // });
         
         // Cập nhật tổng đếm
         countingState.totalCounted = totalCountFromDevice;
         
-        console.log(`Đơn ${currentOrderIndex + 1}/${selectedOrders.length}: ${currentOrder.customerName}`);
-        console.log(`ESP32 total: ${totalCountFromDevice} | Đã xong: ${completedCount} | Đơn hiện tại: ${currentOrder.currentCount}/${currentOrder.quantity}`);
-        console.log(`Tổng batch: ${countingState.totalCounted}/${countingState.totalPlanned}`);
+        // console.log(`Đơn ${currentOrderIndex + 1}/${selectedOrders.length}: ${currentOrder.customerName}`);
+        // console.log(`ESP32 total: ${totalCountFromDevice} | Đã xong: ${completedCount} | Đơn hiện tại: ${currentOrder.currentCount}/${currentOrder.quantity}`);
+        // console.log(`Tổng batch: ${countingState.totalCounted}/${countingState.totalPlanned}`);
         
         // Kiểm tra xem đơn hàng hiện tại đã hoàn thành chưa
         if (currentOrder.currentCount >= currentOrder.quantity) {
@@ -4178,7 +4286,7 @@ function debugBatches() {
   console.log('localStorage data:', saved);
   
   const activeBatch = orderBatches.find(b => b.isActive);
-  console.log('Active batch:', activeBatch);
+  // console.log('Active batch:', activeBatch);
   
   return {
     batches: orderBatches,
@@ -4862,7 +4970,7 @@ function updateOrderStatusFromESP32(esp32Orders) {
     }
     
     // Log để debug
-    console.log('Active batch:', activeBatch.name, 'has', activeBatch.orders.length, 'orders');
+    // console.log('Active batch:', activeBatch.name, 'has', activeBatch.orders.length, 'orders');
     
     // Cập nhật trạng thái các orders từ ESP32
     let hasChanges = false;
@@ -5926,13 +6034,13 @@ function addProductItem() {
   productItem.className = 'product-item';
   productItem.dataset.index = productItemCounter;
   
+  // Tạo select element và populate sau khi đã tạo
   productItem.innerHTML = `
     <div class="form-row">
       <div class="form-group">
         <label>Tên mặt hàng:</label>
         <select class="productSelect" required>
           <option value="">Chọn sản phẩm</option>
-          ${currentProducts.map(p => `<option value="${p.id}">${p.code ? p.code + ' - ' + p.name : p.name}</option>`).join('')}
         </select>
       </div>
       <div class="form-group">
@@ -5952,6 +6060,20 @@ function addProductItem() {
   `;
   
   productsList.appendChild(productItem);
+  
+  // Populate select với currentProducts sau khi element đã được thêm vào DOM
+  const select = productItem.querySelector('.productSelect');
+  if (select && currentProducts && currentProducts.length > 0) {
+    currentProducts.forEach(product => {
+      const option = document.createElement('option');
+      option.value = product.id;
+      option.textContent = product.code ? `${product.code} - ${product.name}` : product.name;
+      select.appendChild(option);
+    });
+    console.log('✅ DEBUG: Populated select with', currentProducts.length, 'products');
+  } else {
+    console.warn('⚠️ DEBUG: No currentProducts available when creating select');
+  }
 }
 
 function removeProductItem(index) {
@@ -5975,7 +6097,6 @@ function addInitialProductItem() {
           <label>Tên mặt hàng:</label>
           <select class="productSelect" required>
             <option value="">Chọn sản phẩm</option>
-            ${currentProducts.map(p => `<option value="${p.id}">${p.code ? p.code + ' - ' + p.name : p.name}</option>`).join('')}
           </select>
         </div>
         <div class="form-group">
@@ -5994,6 +6115,20 @@ function addInitialProductItem() {
       </div>
     </div>
   `;
+  
+  // Populate select với currentProducts sau khi element đã được tạo
+  const select = productsList.querySelector('.productSelect');
+  if (select && currentProducts && currentProducts.length > 0) {
+    currentProducts.forEach(product => {
+      const option = document.createElement('option');
+      option.value = product.id;
+      option.textContent = product.code ? `${product.code} - ${product.name}` : product.name;
+      select.appendChild(option);
+    });
+    console.log('✅ DEBUG: Populated initial select with', currentProducts.length, 'products');
+  } else {
+    console.warn('⚠️ DEBUG: No currentProducts available when creating initial select');
+  }
 }
 
 function addMultipleOrdersToBatch() {
@@ -6014,10 +6149,18 @@ function addMultipleOrdersToBatch() {
     const quantity = item.querySelector('.quantity');
     const warningQuantity = item.querySelector('.warningQuantity');
     
+    console.log('🔍 DEBUG: Processing product item:');
+    console.log('   productSelect.value:', productSelect.value);
+    console.log('   quantity.value:', quantity.value);
+    console.log('   currentProducts:', currentProducts);
+    
     if (productSelect.value && quantity.value) {
       // Tìm product object hoàn chỉnh theo ID
       const product = currentProducts.find(p => p.id == productSelect.value);
+      console.log('🔍 DEBUG: Found product:', product);
+      
       if (!product) {
+        console.error('❌ DEBUG: Product not found for ID:', productSelect.value);
         showNotification(`Không tìm thấy sản phẩm với ID: ${productSelect.value}`, 'error');
         continue;
       }
