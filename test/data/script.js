@@ -1448,7 +1448,11 @@ function addOrderToBatch() {
   }
   
   // ✅ CHO PHÉP DUPLICATE ORDER CODE - Bỏ check duplicate để có thể tạo nhiều đơn cùng mã
-  console.log('✅ Allowing duplicate orderCode for multiple orders with same code');
+  // Người dùng có thể tạo nhiều đơn hàng với:
+  // - Cùng mã đơn hàng (orderCode)
+  // - Cùng tên sản phẩm (productName)
+  // - Cùng thông tin khách hàng
+  console.log('✅ Allowing duplicate orderCode and productName for multiple orders with same info');
   
   const newOrder = {
     id: orderIdCounter++,
@@ -2682,7 +2686,7 @@ function updateAllProductSelects() {
     
     currentProducts.forEach(product => {
       const option = document.createElement('option');
-      option.value = product.name; // Dùng name cho consistency
+      option.value = product.id; // Sửa từ product.name thành product.id
       option.textContent = product.code ? `${product.code} - ${product.name}` : product.name;
       select.appendChild(option);
     });
@@ -5928,7 +5932,7 @@ function addProductItem() {
         <label>Tên mặt hàng:</label>
         <select class="productSelect" required>
           <option value="">Chọn sản phẩm</option>
-          ${currentProducts.map(p => `<option value="${p.name}">${p.code ? p.code + ' - ' + p.name : p.name}</option>`).join('')}
+          ${currentProducts.map(p => `<option value="${p.id}">${p.code ? p.code + ' - ' + p.name : p.name}</option>`).join('')}
         </select>
       </div>
       <div class="form-group">
@@ -5971,7 +5975,7 @@ function addInitialProductItem() {
           <label>Tên mặt hàng:</label>
           <select class="productSelect" required>
             <option value="">Chọn sản phẩm</option>
-            ${currentProducts.map(p => `<option value="${p.name}">${p.code ? p.code + ' - ' + p.name : p.name}</option>`).join('')}
+            ${currentProducts.map(p => `<option value="${p.id}">${p.code ? p.code + ' - ' + p.name : p.name}</option>`).join('')}
           </select>
         </div>
         <div class="form-group">
@@ -6011,23 +6015,19 @@ function addMultipleOrdersToBatch() {
     const warningQuantity = item.querySelector('.warningQuantity');
     
     if (productSelect.value && quantity.value) {
-      // Tìm product object hoàn chỉnh
-      const product = currentProducts.find(p => p.name === productSelect.value);
+      // Tìm product object hoàn chỉnh theo ID
+      const product = currentProducts.find(p => p.id == productSelect.value);
       if (!product) {
-        showNotification(`Không tìm thấy sản phẩm: ${productSelect.value}`, 'error');
+        showNotification(`Không tìm thấy sản phẩm với ID: ${productSelect.value}`, 'error');
         continue;
       }
       
-      // Kiểm tra xem sản phẩm này đã được thêm chưa
-      const existingOrder = orders.find(o => o.product.id === product.id);
-      if (existingOrder) {
-        showNotification(`Sản phẩm ${product.name} đã được thêm rồi`, 'warning');
-        continue;
-      }
+      // ✅ CHO PHÉP TẠO NHIỀU ĐỠN HÀNG CÙNG MÃ VÀ SẢN PHẨM
+      // Không kiểm tra trùng lặp để cho phép tạo nhiều đơn hàng giống nhau
       
       const newOrder = {
         id: orderIdCounter++, // Simple incrementing ID
-        orderNumber: orders.length + 1, // Simple order number in batch
+        orderNumber: currentOrderBatch.length + orders.length + 1, // Đảm bảo không trùng orderNumber
         customerName,
         orderCode: orderCode, // GIỮ NGUYÊN mã đơn hàng như user nhập - KHÔNG auto-append số
         vehicleNumber,
