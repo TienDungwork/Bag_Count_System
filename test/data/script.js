@@ -67,7 +67,6 @@ document.addEventListener('DOMContentLoaded', async function() {
   updateBatchSelector();
   updateProductTable();
   updateBatchDisplay();
-  updateOverview();
   updateConveyorNameDisplay();
   showTab('overview');
   
@@ -91,6 +90,12 @@ document.addEventListener('DOMContentLoaded', async function() {
   
   // Khởi tạo trạng thái ban đầu cho các nút bấm
   initializeButtonStates();
+  
+  // Khôi phục trạng thái đếm nếu có đơn hàng đang counting
+  restoreCountingState();
+  
+  // Cập nhật overview sau khi restore state
+  updateOverview();
   
   // Cập nhật tất cả dropdown sản phẩm sau khi load xong
   updateAllProductSelects();
@@ -1102,6 +1107,52 @@ function initializeButtonStates() {
   updateButtonStates('reset');
   
   console.log('Button states initialized to ready state');
+}
+
+// Khôi phục trạng thái đếm từ dữ liệu đã lưu
+function restoreCountingState() {
+  console.log('Checking for existing counting state...');
+  
+  // Tìm batch đang active
+  const activeBatch = orderBatches.find(b => b.isActive);
+  if (!activeBatch) {
+    console.log('No active batch found');
+    return;
+  }
+  
+  // Tìm đơn hàng đang counting hoặc paused
+  const countingOrders = activeBatch.orders.filter(o => o.status === 'counting');
+  const pausedOrders = activeBatch.orders.filter(o => o.status === 'paused');
+  
+  if (countingOrders.length > 0) {
+    console.log('Found orders in counting state, restoring counting mode...');
+    
+    // Khôi phục trạng thái đếm đang chạy
+    countingState.isActive = true;
+    
+    // Cập nhật UI cho trạng thái đang đếm
+    updateButtonStates('started');
+    
+    console.log('Counting state restored successfully');
+    showNotification('Đã khôi phục trạng thái đếm đang chạy', 'info');
+  } else if (pausedOrders.length > 0) {
+    console.log('Found orders in paused state, restoring paused mode...');
+    
+    // Khôi phục trạng thái tạm dừng
+    countingState.isActive = false;
+    
+    // Cập nhật UI cho trạng thái tạm dừng
+    updateButtonStates('paused');
+    
+    console.log('Paused state restored successfully');
+    showNotification('Đã khôi phục trạng thái tạm dừng', 'info');
+  } else {
+    console.log('No orders in counting/paused state');
+  }
+  
+  // Cập nhật thông tin hiển thị
+  updateOverview();
+  updateOrderTable();
 }
 
 function updateUIForStart() {
@@ -2231,26 +2282,53 @@ function updateButtonStates(state) {
   const pauseBtn = document.getElementById('pauseBtn');
   const resetBtn = document.getElementById('resetBtn');
   
+  if (!startBtn || !pauseBtn || !resetBtn) {
+    console.warn('Button elements not found');
+    return;
+  }
+  
   // Reset all states first
   startBtn.classList.remove('dimmed');
   pauseBtn.classList.remove('dimmed');
   resetBtn.classList.remove('dimmed');
+  startBtn.disabled = false;
+  pauseBtn.disabled = false;
+  resetBtn.disabled = false;
+  
+  // Kiểm tra xem có batch active và có đơn hàng được chọn không
+  const activeBatch = orderBatches.find(b => b.isActive);
+  const hasSelectedOrders = activeBatch && activeBatch.orders.some(o => o.selected);
   
   switch(state) {
     case 'started':
       startBtn.classList.add('dimmed');
+      startBtn.disabled = true;
+      pauseBtn.disabled = false;
+      resetBtn.disabled = false;
       break;
     case 'paused':
       pauseBtn.classList.add('dimmed');
+      pauseBtn.disabled = true;
+      startBtn.disabled = false;
+      resetBtn.disabled = false;
       break;
     case 'reset':
+      // Trạng thái ban đầu - chỉ nút start hoạt động nếu có đơn hàng được chọn
       pauseBtn.classList.add('dimmed');
       resetBtn.classList.add('dimmed');
+      pauseBtn.disabled = true;
+      resetBtn.disabled = true;
+      startBtn.disabled = !hasSelectedOrders;
+      if (!hasSelectedOrders) {
+        startBtn.classList.add('dimmed');
+      }
       break;
     default:
       // All buttons active
       break;
   }
+  
+  console.log(`Button states updated to: ${state}, hasSelectedOrders: ${hasSelectedOrders}`);
 }
 
 // Counting Control (Updated)
@@ -2839,6 +2917,8 @@ function updateOverview() {
   if (!activeBatch) {
     if (planCountElement) planCountElement.textContent = '0';
     if (executeCountElement) executeCountElement.textContent = '0';
+    // Reset button states khi không có batch
+    updateButtonStates('reset');
     return;
   }
   
@@ -2851,6 +2931,21 @@ function updateOverview() {
   
   if (planCountElement) planCountElement.textContent = totalPlanned;
   if (executeCountElement) executeCountElement.textContent = totalCounted;
+  
+  // Cập nhật trạng thái nút dựa trên trạng thái đếm hiện tại
+  const hasCountingOrders = selectedOrders.some(o => o.status === 'counting');
+  const hasPausedOrders = selectedOrders.some(o => o.status === 'paused');
+  
+  if (hasCountingOrders) {
+    // Có đơn hàng đang đếm - trạng thái started
+    updateButtonStates('started');
+  } else if (hasPausedOrders) {
+    // Có đơn hàng bị tạm dừng - trạng thái paused
+    updateButtonStates('paused');
+  } else {
+    // Không có đơn hàng đang đếm - trạng thái reset
+    updateButtonStates('reset');
+  }
 }
 
 // History Management (Updated)
