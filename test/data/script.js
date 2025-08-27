@@ -34,6 +34,7 @@ const API_POLL_FREQUENCY = 5000; // 5 seconds - ONLY for products/settings sync,
 
 let settings = {
   conveyorName: 'BT-001',
+  location: '',
   ipAddress: '192.168.1.200',
   gateway: '192.168.1.1',
   subnet: '255.255.255.0',
@@ -47,17 +48,23 @@ let settings = {
 
 // Initialize application
 document.addEventListener('DOMContentLoaded', async function() {
+  console.log('🚀 DOMContentLoaded - Starting app initialization...');
+  
   // Load data from ESP32 first, fallback to localStorage
   try {
+    console.log('🔄 Trying to load data from ESP32...');
     await loadAllDataFromESP32();
   } catch (error) {
+    console.log('⚠️ ESP32 failed, loading from localStorage...');
     loadSettings();
     loadProducts();
     loadOrderBatches();
     loadHistory();
   }
   
+  console.log('🔄 Updating UI components...');
   updateCurrentBatchSelect();
+  updateBatchSelector();
   updateProductTable();
   updateBatchDisplay();
   updateOverview();
@@ -92,18 +99,7 @@ document.addEventListener('DOMContentLoaded', async function() {
   setTimeout(() => {
     getDeviceInfo();
   }, 2000);
-
-  // Setup WiFi Static IP toggle
-  const useStaticIPCheckbox = document.getElementById('useStaticIP');
-  if (useStaticIPCheckbox) {
-    useStaticIPCheckbox.addEventListener('change', function() {
-      const staticIPConfig = document.getElementById('staticIPConfig');
-      if (staticIPConfig) {
-        staticIPConfig.style.display = this.checked ? 'block' : 'none';
-      }
-    });
-  }
-
+  
   console.log('✅ Application initialized successfully');
   // showNotification('Ứng dụng đã khởi tạo (MQTT Real-time mode)', 'success');
 });
@@ -309,7 +305,7 @@ async function forceRefreshFromESP32() {
 // Debug ESP32 settings
 async function debugESP32Settings() {
   try {
-    console.log('🔍 Debugging ESP32 settings...');
+    //console.log('Debugging ESP32 settings...');
     
     const response = await fetch('/api/debug/settings');
     if (response.ok) {
@@ -322,7 +318,7 @@ async function debugESP32Settings() {
       console.log('🖥️ System info:', debugData.system || 'NO SYSTEM DATA');
       console.log('=== END DEBUG ===');
       
-      showNotification('Debug info printed to console (F12)', 'info');
+      //showNotification('Debug info printed to console (F12)', 'info');
       
       // Hiển thị popup với info quan trọng
       const fileExists = debugData.files?.settings_exists || false;
@@ -336,7 +332,7 @@ async function debugESP32Settings() {
     
   } catch (error) {
     console.error('Error debugging ESP32:', error);
-    showNotification('Lỗi debug ESP32: ' + error.message, 'error');
+    showNotification('Lỗi debug: ' + error.message, 'error');
   }
 }
 
@@ -408,9 +404,9 @@ async function compareSettings() {
       if (differences.length > 0) {
         console.log('❌ DIFFERENCES FOUND:');
         differences.forEach(diff => console.log('  - ' + diff));
-        showNotification(`Phát hiện ${differences.length} khác biệt - xem console`, 'warning');
+        //showNotification(`Phát hiện ${differences.length} khác biệt - xem console`, 'warning');
       } else {
-        console.log('✅ No differences found');
+        console.log('No differences found');
         showNotification('Settings đồng bộ hoàn hảo', 'success');
       }
       
@@ -603,7 +599,7 @@ async function resetAllDataToDefault() {
         updateHistoryTable();
         updateSettingsForm();
         
-        showNotification('✅ Đã reset tất cả dữ liệu về mặc định', 'success');
+        showNotification('Đã reset tất cả dữ liệu về mặc định', 'success');
         
       } catch (error) {
         console.error('Error resetting data:', error);
@@ -1763,9 +1759,9 @@ async function saveBatch() {
       }
     }
     
-    showNotification('Lưu danh sách đơn hàng thành công và đồng bộ với ESP32', 'success');
+   // showNotification('Lưu danh sách đơn hàng thành công và đồng bộ với ESP32', 'success');
   } else {
-    showNotification('Lưu danh sách thành công nhưng có lỗi đồng bộ với ESP32', 'warning');
+    //showNotification('Lưu danh sách thành công nhưng có lỗi đồng bộ với ESP32', 'warning');
   }
   
   // Reset form
@@ -1858,6 +1854,8 @@ function switchBatch() {
       
       // KHÔNG RESET currentPage để tránh nhảy về đơn 1
       // currentPage = 1; // BỎ DÒNG NÀY
+      updateBatchSelector();
+      updateCurrentBatchSelect();
       updateBatchDisplay();
       updateOverview();
       
@@ -1875,21 +1873,14 @@ function updateBatchSelector() {
     return;
   }
   
-  // console.log('Updating batch selector with', orderBatches.length, 'batches');
+  console.log('🔄 Updating batch selector with', orderBatches.length, 'batches');
+  console.log('📋 Current orderBatches:', orderBatches);
   
   select.innerHTML = '<option value="">Chọn danh sách đơn hàng</option>';
   
-  // BỎ auto-activate để tránh thay đổi batch đang chọn
-  // Auto-activate first batch if no active batch exists
-  // if (orderBatches.length > 0 && !orderBatches.find(b => b.isActive)) {
-  //   orderBatches[0].isActive = true;
-  //   saveOrderBatches();
-  //   console.log('Auto-activated first batch:', orderBatches[0].name);
-  // }
-  
   orderBatches.forEach(batch => {
     const option = document.createElement('option');
-    option.value = batch.name; // Dùng tên batch làm value thay vì ID
+    option.value = batch.name; // Dùng tên batch làm value
     const ordersCount = (batch.orders && batch.orders.length) || 0;
     option.textContent = `${batch.name} (${ordersCount} đơn)`;
     if (batch.isActive) {
@@ -1899,6 +1890,8 @@ function updateBatchSelector() {
     select.appendChild(option);
     console.log('📋 Added batch option:', batch.name, 'isActive:', batch.isActive);
   });
+  
+  console.log('✅ batchSelector updated independently with', orderBatches.length, 'batches');
 }
 
 function updateCurrentBatchSelect() {
@@ -1917,27 +1910,6 @@ function updateCurrentBatchSelect() {
       }
       select.appendChild(option);
     });
-  }
-  
-  // CẬP NHẬT DROPDOWN TRONG OVERVIEW TAB
-  const batchSelector = document.getElementById('batchSelector');
-  if (batchSelector) {
-    batchSelector.innerHTML = '<option value="">Chọn danh sách đơn hàng</option>';
-    
-    orderBatches.forEach(batch => {
-      const option = document.createElement('option');
-      option.value = batch.name; // Dùng tên batch thay vì ID
-      const ordersCount = (batch.orders && batch.orders.length) || 0;
-      option.textContent = `${batch.name} (${ordersCount} đơn)`;
-      if (batch.isActive) {
-        option.selected = true;
-        console.log('✅ Setting selected for active batch in batchSelector:', batch.name);
-      }
-      batchSelector.appendChild(option);
-      console.log('📋 Added batch to batchSelector:', batch.name, 'isActive:', batch.isActive);
-    });
-    
-    console.log('✅ Updated batchSelector with', orderBatches.length, 'batches');
   }
 }
 
@@ -2159,7 +2131,7 @@ function updateOrderTable() {
   
   let selectedCount = 0;
   
-  pageOrders.forEach(order => {
+  pageOrders.forEach((order, index) => {
     if (order.selected) selectedCount++;
     
     const row = document.createElement('tr');
@@ -2184,8 +2156,11 @@ function updateOrderTable() {
     // Hiển thị số đếm hiện tại nếu có
     const currentCountText = order.currentCount > 0 ? ` (${order.currentCount})` : '';
     
+    // ✅ THAY ĐỔI: Hiển thị thứ tự tự động thay vì orderCode
+    const orderSequence = startIndex + index + 1; // Thứ tự tự động từ 1
+    
     row.innerHTML = `
-      <td><span class="order-number">${order.orderCode || 'N/A'}</span></td>
+      <td><span class="order-number">${orderSequence}</span></td>
       <td>
         <input type="checkbox" ${order.selected ? 'checked' : ''} 
                onchange="selectOrder(${order.id}, this.checked)"
@@ -2679,9 +2654,6 @@ function addProduct() {
   updateProductTable();
   updateAllProductSelects(); // Cập nhật tất cả dropdown
   
-  // GỬI SẢNPHẨM ĐẾN ESP32
-  sendProductToESP32(newProduct);
-  
   // Clear form
   document.getElementById('productForm').reset();
   showNotification('Thêm sản phẩm thành công', 'success');
@@ -2698,50 +2670,32 @@ function editProduct(index) {
   updateProductTable();
 }
 
-function deleteProduct(index) {
-  if (confirm('Bạn có chắc chắn muốn xóa sản phẩm này?')) {
-    const productToDelete = currentProducts[index];
-    
-    // Xóa từ array local
-    currentProducts.splice(index, 1);
-    
-    // Lưu và sync với ESP32
-    saveProducts(); // Đã bao gồm sendAllProductsToESP32()
-    
-    // GỬI LỆNH XÓA ĐẾN ESP32
-    if (productToDelete && productToDelete.id) {
-      deleteProductFromESP32(productToDelete.id);
-    }
-    
-    updateProductTable();
-    updateAllProductSelects(); // Cập nhật tất cả dropdown
-    showNotification('Xóa sản phẩm thành công', 'success');
-  }
-}
-
 function updateProductTable() {
+  console.log('🔄 Updating product table with', currentProducts.length, 'products');
+  
   const tbody = document.getElementById('productTableBody');
-  if (!tbody) return;
+  if (!tbody) {
+    console.error('❌ productTableBody element not found!');
+    return;
+  }
   
   tbody.innerHTML = '';
   
   if (currentProducts.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="5" class="text-center">Chưa có sản phẩm nào</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="4" class="text-center">Chưa có sản phẩm nào</td></tr>';
     return;
   }
   
   currentProducts.forEach((product, index) => {
+    console.log('➕ Adding product to table:', product.code, product.name, product.unitWeight + 'kg');
+    
     const row = document.createElement('tr');
     row.innerHTML = `
-      <td>${product.name}</td>
       <td>${product.code}</td>
-      <td>${product.unitWeight} kg</td>
-      <td>${new Date(product.createdAt).toLocaleDateString('vi-VN')}</td>
+      <td>${product.name}</td>
+      <td>${product.unitWeight || 0} kg</td>
       <td>
-        <button class="btn-edit" onclick="editProduct(${index})">
-          <i class="fas fa-edit"></i>
-        </button>
-        <button class="btn-danger" onclick="deleteProduct(${index})">
+        <button class="btn-danger" onclick="deleteProduct(${product.id})">
           <i class="fas fa-trash"></i>
         </button>
       </td>
@@ -3199,7 +3153,23 @@ function loadOrderBatches() {
       }
     ];
     saveOrderBatches();
+    console.log('✅ Created sample batch:', orderBatches[0]);
   }
+  
+  console.log('🔧 DEBUG: Final orderBatches array length:', orderBatches.length);
+  console.log('🔧 DEBUG: Final orderBatches data:', orderBatches);
+  
+  // Force update batchSelector after loading data
+  console.log('🔄 Calling updateBatchSelector after loadOrderBatches');
+  
+  // Try immediate update
+  updateBatchSelector();
+  
+  // Also try delayed update to ensure DOM is ready
+  setTimeout(() => {
+    console.log('🔄 Delayed updateBatchSelector call');
+    updateBatchSelector();
+  }, 1000);
 }
 
 function saveOrderBatches() {
@@ -3240,11 +3210,11 @@ async function sendOrderBatchesToESP32() {
     // Cảnh báo nếu dữ liệu quá lớn (ESP32 có giới hạn)
     if (dataSize > 10000) { // Giảm từ 12KB xuống 10KB safety limit cho ESP32
       console.warn('⚠️ Data size large:', dataSize, 'chars - may cause ESP32 memory issues');
-      showNotification(`Cảnh báo: Dữ liệu lớn (${Math.round(dataSize/1000)}KB) có thể gây lỗi ESP32`, 'warning');
+      showNotification(`Cảnh báo: Dữ liệu lớn (${Math.round(dataSize/1000)}KB) có thể gây lỗi thiết bị`, 'warning');
       
       // Suggest user to reduce orders if data is too large
       if (dataSize > 15000) {
-        if (!confirm(`Dữ liệu rất lớn (${Math.round(dataSize/1000)}KB). ESP32 có thể không xử lý được.\n\nBạn có muốn tiếp tục? (Khuyến nghị: Giảm số đơn hàng hoặc chia nhỏ batch)`)) {
+        if (!confirm(`Dữ liệu rất lớn (${Math.round(dataSize/1000)}KB). thiết bị có thể không xử lý được.\n\nBạn có muốn tiếp tục? (Khuyến nghị: Giảm số đơn hàng hoặc chia nhỏ batch)`)) {
           return false;
         }
       }
@@ -3362,6 +3332,7 @@ async function loadSettingsFromESP32() {
       
       // ⚡ GHI ĐÈ HOÀN TOÀN settings từ ESP32 (không merge)
       if (esp32Settings.conveyorName !== undefined) settings.conveyorName = esp32Settings.conveyorName;
+      if (esp32Settings.location !== undefined) settings.location = esp32Settings.location;
       if (esp32Settings.ipAddress !== undefined) settings.ipAddress = esp32Settings.ipAddress;
       if (esp32Settings.gateway !== undefined) settings.gateway = esp32Settings.gateway;
       if (esp32Settings.subnet !== undefined) settings.subnet = esp32Settings.subnet;
@@ -3392,6 +3363,7 @@ async function loadSettingsFromESP32() {
 
 function updateSettingsForm() {
   document.getElementById('conveyorName').value = settings.conveyorName;
+  document.getElementById('location').value = settings.location || '';
   document.getElementById('ipAddress').value = settings.ipAddress;
   document.getElementById('gateway').value = settings.gateway;
   document.getElementById('subnet').value = settings.subnet;
@@ -3543,7 +3515,7 @@ async function sendESP32Command(action, data = {}) {
     
   } catch (error) {
     console.error('Error sending ESP32 command:', error);
-    showNotification('Lỗi gửi lệnh đến ESP32: ' + error.message, 'error');
+    showNotification('Lỗi gửi lệnh: ' + error.message, 'error');
     return null;
   }
 }
@@ -3718,7 +3690,7 @@ async function activateBatchOnESP32(batch) {
       await sendOrderToESP32(firstOrder);
     }
     
-    showNotification(`Đã chọn danh sách: ${batch.name}`, 'success');
+    //showNotification(`Đã chọn danh sách: ${batch.name}`, 'success');
     return true;
     
   } catch (error) {
@@ -4046,8 +4018,27 @@ async function moveToNextOrder() {
   const currentOrderIndex = selectedOrders.findIndex(o => o.status === 'counting');
   
   if (currentOrderIndex >= 0) {
+    // Lấy thông tin đơn hàng hiện tại trước khi đánh dấu completed
+    const completedOrder = selectedOrders[currentOrderIndex];
+    
     // Đánh dấu đơn hàng hiện tại hoàn thành
     selectedOrders[currentOrderIndex].status = 'completed';
+    
+    // 📝 LƯU LỊCH SỬ CHO ĐƠN HÀNG VỪA HOÀN THÀNH
+    const orderHistoryEntry = {
+      timestamp: new Date().toISOString(),
+      customerName: completedOrder.customerName,
+      productName: completedOrder.product?.name || completedOrder.productName || 'N/A',
+      orderCode: completedOrder.orderCode,
+      vehicleNumber: completedOrder.vehicleNumber,
+      plannedQuantity: completedOrder.quantity,
+      actualCount: completedOrder.currentCount || 0,
+      isBatch: false
+    };
+    
+    console.log('📝 Saving individual order to history:', completedOrder.orderCode);
+    countingHistory.push(orderHistoryEntry);
+    saveHistory();
     
     // Kiểm tra còn đơn hàng tiếp theo không
     if (currentOrderIndex < selectedOrders.length - 1) {
@@ -4079,7 +4070,7 @@ async function moveToNextOrder() {
       
       console.log('ESP32 next_order command sent with productCode:', nextProductCode, 'updating UI...');
       
-      showNotification(`Chuyen den don ${countingState.currentOrderIndex + 1}/${selectedOrders.length}: ${nextOrder.customerName}`, 'info');
+      // showNotification(`Chuyen den don ${countingState.currentOrderIndex + 1}/${selectedOrders.length}: ${nextOrder.customerName}`, 'info');
       
     } else {
       // HẾT ĐƠN HÀNG - HOÀN THÀNH TẤT CẢ
@@ -4110,6 +4101,10 @@ async function moveToNextOrder() {
 function saveBatchToCountingHistory(batch, completedOrders) {
   const now = new Date();
   
+  console.log('🔄 Saving batch to counting history:', batch.name);
+  console.log('📊 Completed orders:', completedOrders.length);
+  console.log('📊 Total counted:', countingState.totalCounted);
+  
   // Tạo entry tổng cho batch
   const batchEntry = {
     timestamp: now.toISOString(),
@@ -4138,8 +4133,8 @@ function saveBatchToCountingHistory(batch, completedOrders) {
   countingHistory.push(batchEntry);
   saveHistory();
   
-  console.log('Đã lưu batch vào lịch sử đếm:', batch.name);
-  console.log('Tổng kế hoạch:', batchEntry.plannedQuantity, '- Tổng thực hiện:', batchEntry.actualCount);
+  console.log('✅ Đã lưu batch vào lịch sử đếm:', batch.name);
+  console.log('📊 Tổng kế hoạch:', batchEntry.plannedQuantity, '- Tổng thực hiện:', batchEntry.actualCount);
   
   // Cập nhật bảng lịch sử
   updateHistoryTable();
@@ -4336,39 +4331,6 @@ function setMode(mode) {
 }
 
 // Product Management
-function addProduct() {
-  const productCode = document.getElementById('productCode').value.trim();
-  const productName = document.getElementById('productName').value.trim();
-  
-  if (!productCode || !productName) {
-    alert('Vui lòng nhập đầy đủ mã sản phẩm và tên sản phẩm');
-    return;
-  }
-  
-  // Check if product code already exists
-  if (currentProducts.find(p => p.code === productCode)) {
-    alert('Mã sản phẩm đã tồn tại');
-    return;
-  }
-  
-  const newProduct = {
-    id: productIdCounter++,
-    code: productCode,
-    name: productName
-  };
-  
-  currentProducts.push(newProduct);
-  saveProducts();
-  updateProductTable();
-  updateProductSelect();
-  
-  // Clear form
-  document.getElementById('productCode').value = '';
-  document.getElementById('productName').value = '';
-  
-  showNotification('Thêm sản phẩm thành công', 'success');
-}
-
 function deleteProduct(id) {
   if (confirm('Bạn có chắc chắn muốn xóa sản phẩm này?')) {
     // Xóa từ array local
@@ -4384,27 +4346,6 @@ function deleteProduct(id) {
     updateProductSelect();
     showNotification('Xóa sản phẩm thành công', 'success');
   }
-}
-
-function updateProductTable() {
-  const tbody = document.getElementById('productTableBody');
-  if (!tbody) return;
-  
-  tbody.innerHTML = '';
-  
-  currentProducts.forEach(product => {
-    const row = document.createElement('tr');
-    row.innerHTML = `
-      <td>${product.code}</td>
-      <td>${product.name}</td>
-      <td>
-        <button class="btn-danger" onclick="deleteProduct(${product.id})" style="padding: 5px 10px; font-size: 12px;">
-          <i class="fas fa-trash"></i>
-        </button>
-      </td>
-    `;
-    tbody.appendChild(row);
-  });
 }
 
 function updateProductSelect() {
@@ -4617,17 +4558,6 @@ function clearHistory() {
 }
 
 // Settings Management
-function updateSettingsForm() {
-  document.getElementById('conveyorName').value = settings.conveyorName;
-  document.getElementById('ipAddress').value = settings.ipAddress;
-  document.getElementById('gateway').value = settings.gateway;
-  document.getElementById('subnet').value = settings.subnet;
-  document.getElementById('sensorDelay').value = settings.sensorDelay;
-  document.getElementById('autoReset').checked = settings.autoReset;
-  document.getElementById('brightness').value = settings.brightness;
-  document.getElementById('brightnessValue').textContent = settings.brightness + '%';
-}
-
 function saveSettings() {
   console.log('💾 Saving settings - CURRENT STATE CHECK...');
   
@@ -4636,6 +4566,7 @@ function saveSettings() {
   
   // Get form values và update settings object
   settings.conveyorName = document.getElementById('conveyorName').value;
+  settings.location = document.getElementById('location').value || '';
   settings.ipAddress = document.getElementById('ipAddress').value;
   settings.gateway = document.getElementById('gateway').value;
   settings.subnet = document.getElementById('subnet').value;
@@ -4644,6 +4575,10 @@ function saveSettings() {
   settings.minBagInterval = parseInt(document.getElementById('minBagInterval').value);
   settings.autoReset = document.getElementById('autoReset').checked;
   settings.brightness = parseInt(document.getElementById('brightness').value);
+  settings.relayDelayAfterComplete = parseInt(document.getElementById('relayDelay').value) * 1000; // Convert seconds to ms
+  
+  console.log('🔧 DEBUG: relayDelay form value:', document.getElementById('relayDelay').value);
+  console.log('🔧 DEBUG: settings.relayDelayAfterComplete after update:', settings.relayDelayAfterComplete);
   
   console.log('📊 Updated settings for save:', settings);
   
@@ -4792,11 +4727,13 @@ function sendSettingsToESP32() {
   // 🔄 GỬI SETTINGS TỚI ESP32 ĐỂ GHI ĐÈ CÁC GIÁ TRỊ MẶC ĐỊNH
   const data = {
     conveyorName: settings.conveyorName,
+    location: settings.location,
     brightness: settings.brightness,
     sensorDelay: settings.sensorDelay,
     bagDetectionDelay: settings.bagDetectionDelay,   // ⚡ GHI ĐÈ default 200ms
     minBagInterval: settings.minBagInterval,         // ⚡ GHI ĐÈ default 100ms
     autoReset: settings.autoReset,                   // ⚡ GHI ĐÈ default false
+    relayDelayAfterComplete: settings.relayDelayAfterComplete, // ⚡ Thêm relay delay
     // Network settings
     ipAddress: settings.ipAddress,
     gateway: settings.gateway,
@@ -4825,21 +4762,32 @@ function sendSettingsToESP32() {
     
     if (result.needRestart) {
       // Hiển thị thông báo cần restart
-      if (confirm('IP Address đã thay đổi. Cần khởi động lại ESP32 để áp dụng. Khởi động lại ngay?')) {
+      if (confirm('IP Address đã thay đổi. Cần khởi động lại thiết bị để áp dụng. Khởi động lại ngay?')) {
         restartESP32();
       } else {
-        showNotification('Lưu ý: Cần khởi động lại ESP32 để áp dụng IP mới', 'warning');
+        showNotification('Lưu ý: Cần khởi động lại thiết bị để áp dụng IP mới', 'warning');
       }
     } else {
-      showNotification('✅ Cài đặt đã được lưu và áp dụng trên ESP32', 'success');
+      showNotification('✅ Cài đặt đã được lưu và áp dụng trên thiết bị', 'success');
       
-      // ⚡ VERIFY: Load lại settings từ ESP32 để kiểm tra
+      // ⚡ KHÔNG reload settings từ ESP32 để tránh ghi đè giá trị vừa save
+      // Chỉ cập nhật display name
+      updateConveyorNameDisplay();
+      
+      // Optional: chỉ verify sau 3 giây và không ghi đè
       setTimeout(async () => {
-        console.log('🔍 Verifying saved settings...');
-        await loadSettingsFromESP32();
-        await compareSettings(); // So sánh để đảm bảo đồng bộ
-        updateConveyorNameDisplay(); // Đảm bảo display được cập nhật
-      }, 1000);
+        console.log('🔍 Quietly verifying settings (no overwrite)...');
+        const response = await fetch('/api/settings');
+        if (response.ok) {
+          const esp32Settings = await response.json();
+          console.log('📡 ESP32 settings after save:', esp32Settings);
+          
+          // Chỉ so sánh, không ghi đè
+          if (esp32Settings.relayDelayAfterComplete !== settings.relayDelayAfterComplete) {
+            console.log('⚠️ relayDelayAfterComplete mismatch: local=' + settings.relayDelayAfterComplete + ', ESP32=' + esp32Settings.relayDelayAfterComplete);
+          }
+        }
+      }, 3000);
     }
   })
   .catch(error => {
@@ -4861,7 +4809,7 @@ function restartESP32() {
     method: 'POST'
   })
   .then(() => {
-    showNotification('Đang khởi động lại ESP32...', 'info');
+    showNotification('Đang khởi động lại thiết bị...', 'info');
     // Chờ một chút rồi reload trang với IP mới
     setTimeout(() => {
       window.location.href = `http://${settings.ipAddress}`;
@@ -6210,7 +6158,7 @@ function addMultipleOrdersToBatch() {
   
   updateBatchPreview();
   resetOrderForm();
-  showNotification(`Đã thêm ${orders.length} đơn hàng vào danh sách và gửi đến ESP32`, 'success');
+  showNotification(`Đã thêm ${orders.length} đơn hàng vào danh sách và gửi đến thiết bị`, 'success');
 }
 
 function resetOrderForm() {
@@ -6396,4 +6344,64 @@ async function sendOrderDeleteToESP32(orderData, batchIndex) {
   } catch (error) {
     console.error('❌ Error sending order delete to ESP32:', error);
   }
+}
+
+// DEBUG FUNCTION - Test batchSelector
+function testBatchSelector() {
+  console.log('🧪 TESTING batchSelector...');
+  console.log('📊 orderBatches length:', orderBatches.length);
+  console.log('📊 orderBatches data:', orderBatches);
+  
+  const select = document.getElementById('batchSelector');
+  console.log('🎯 batchSelector element:', select);
+  console.log('🎯 batchSelector exists:', !!select);
+  
+  if (select) {
+    console.log('🎯 Current innerHTML:', select.innerHTML);
+    console.log('🎯 Current options count:', select.options.length);
+  }
+  
+  console.log('🔄 Calling updateBatchSelector()...');
+  updateBatchSelector();
+  
+  if (select) {
+    console.log('✅ After update - options count:', select.options.length);
+    console.log('✅ After update - innerHTML:', select.innerHTML);
+  }
+}
+
+// FORCE REFRESH batchSelector
+function forceRefreshBatchSelector() {
+  console.log('🔄 FORCE REFRESH batchSelector');
+  
+  const select = document.getElementById('batchSelector');
+  if (!select) {
+    console.error('❌ batchSelector not found!');
+    return;
+  }
+  
+  // Clear first
+  select.innerHTML = '';
+  
+  // Add default option
+  const defaultOption = document.createElement('option');
+  defaultOption.value = '';
+  defaultOption.textContent = 'Chọn danh sách đơn hàng';
+  select.appendChild(defaultOption);
+  
+  // Add each batch manually
+  orderBatches.forEach((batch, index) => {
+    console.log(`Adding batch ${index}:`, batch.name);
+    const option = document.createElement('option');
+    option.value = batch.name;
+    const ordersCount = (batch.orders && batch.orders.length) || 0;
+    option.textContent = `${batch.name} (${ordersCount} đơn)`;
+    if (batch.isActive) {
+      option.selected = true;
+      console.log('✅ Set as selected:', batch.name);
+    }
+    select.appendChild(option);
+  });
+  
+  console.log('✅ Force refresh completed. Options count:', select.options.length);
 }

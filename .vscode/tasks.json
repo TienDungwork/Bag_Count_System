@@ -1,0 +1,21 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "Upload ESP32 Code",
+			"type": "shell",
+			"command": "arduino-cli compile --fqbn esp32:esp32:esp32s3 test/test.ino && arduino-cli upload -p COM3 --fqbn esp32:esp32:esp32s3 test/test.ino",
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "build"
+		},
+		{
+			"label": "Compile ESP32 Code",
+			"type": "shell",
+			"command": "arduino-cli compile --fqbn esp32:esp32:esp32s3 test/test.ino",
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "build"
+		}
+	]
+}

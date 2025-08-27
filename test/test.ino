@@ -164,6 +164,7 @@ int bagDetectionDelay;              // Thời gian xác nhận 1 bao (ms) - LOAD
 int minBagInterval;                 // Khoảng cách tối thiểu giữa 2 bao (ms) - LOADED FROM FILE  
 bool autoReset;                     // Tự động reset sau khi hoàn thành - LOADED FROM FILE
 String conveyorName;                // Tên băng tải - LOADED FROM FILE
+String location;                    // Địa điểm - LOADED FROM FILE
 int displayBrightness;              // Độ sáng LED matrix (10-100%) - LOADED FROM FILE
 int sensorDelayMs;                  // Độ trễ cảm biến (ms) - LOADED FROM FILE
 int relayDelayAfterComplete;        // Thời gian relay chạy thêm sau khi hoàn thành (ms) - LOADED FROM FILE
@@ -718,6 +719,7 @@ void saveSettingsToFile() {
   
   // System settings
   doc["conveyorName"] = conveyorName;
+  doc["location"] = location;
   doc["brightness"] = displayBrightness;
   doc["sensorDelay"] = sensorDelayMs;
   doc["bagDetectionDelay"] = bagDetectionDelay;
@@ -777,6 +779,7 @@ void loadSettingsFromFile() {
       
       // Load all settings from file (KHÔNG CÓ FALLBACK - file đã được tạo với giá trị mặc định)
       conveyorName = doc["conveyorName"].as<String>();
+      location = doc["location"].as<String>();
       displayBrightness = doc["brightness"].as<int>();
       sensorDelayMs = doc["sensorDelay"].as<int>();
       bagDetectionDelay = doc["bagDetectionDelay"].as<int>();
@@ -789,6 +792,7 @@ void loadSettingsFromFile() {
       
       Serial.println("    Settings loaded from file:");
       Serial.println("    conveyorName: " + conveyorName);
+      Serial.println("    location: " + location);
       Serial.println("    brightness: " + String(displayBrightness) + "%");
       Serial.println("    sensorDelay: " + String(sensorDelayMs) + "ms");
       Serial.println("    bagDetectionDelay: " + String(bagDetectionDelay) + "ms");
@@ -824,6 +828,7 @@ void createDefaultSettingsFile() {
   
   // Application settings - default values
   doc["conveyorName"] = "BT-001";
+  doc["location"] = "Khu vực 1";
   doc["brightness"] = 35;
   doc["sensorDelay"] = 50;
   doc["bagDetectionDelay"] = 200;
@@ -917,6 +922,7 @@ void debugSettingsFile() {
   
   Serial.println("Current variables in memory:");
   Serial.println("  - conveyorName: " + conveyorName);
+  Serial.println("  - location: " + location);
   Serial.println("  - brightness: " + String(displayBrightness));
   Serial.println("  - sensorDelay: " + String(sensorDelayMs));
   Serial.println("  - bagDetectionDelay: " + String(bagDetectionDelay));
@@ -1647,10 +1653,17 @@ void onMqttMessage(char* topic, byte* payload, unsigned int length) {
         settingsChanged = true;
       }
       
+      if (doc.containsKey("location")) {
+        location = doc["location"].as<String>();
+        Serial.println("✅ MQTT: Applied location: " + location);
+        settingsChanged = true;
+      }
+      
       // Lưu settings vào file nếu có thay đổi
       if (settingsChanged) {
         DynamicJsonDocument settingsDoc(1024);
         settingsDoc["conveyorName"] = conveyorName;
+        settingsDoc["location"] = location;
         settingsDoc["brightness"] = displayBrightness;
         settingsDoc["sensorDelay"] = sensorDelayMs;
         settingsDoc["bagDetectionDelay"] = ::bagDetectionDelay;
@@ -3097,6 +3110,7 @@ void setupWebServer() {
     
     // Trả về giá trị hiện tại từ biến global (đã được load từ file)
     doc["conveyorName"] = conveyorName;
+    doc["location"] = location;
     doc["ipAddress"] = currentNetworkMode == ETHERNET_MODE ? ETH.localIP().toString() : WiFi.localIP().toString();
     doc["gateway"] = gateway.toString();
     doc["subnet"] = subnet.toString();
@@ -3130,6 +3144,12 @@ void setupWebServer() {
         String oldValue = conveyorName;
         conveyorName = doc["conveyorName"].as<String>();
         Serial.println("  ⚡ conveyorName: '" + oldValue + "' → '" + conveyorName + "'");
+      }
+      
+      if (doc.containsKey("location")) {
+        String oldValue = location;
+        location = doc["location"].as<String>();
+        Serial.println("  ⚡ location: '" + oldValue + "' → '" + location + "'");
       }
       
       if (doc.containsKey("brightness")) {
@@ -3213,11 +3233,13 @@ void setupWebServer() {
       
       Serial.println("✅ Settings updated and saved permanently:");
       Serial.println("  - Conveyor Name: " + conveyorName);
+      Serial.println("  - Location: " + location);
       Serial.println("  - Brightness: " + String(displayBrightness) + "%");
       Serial.println("  - Sensor Delay: " + String(sensorDelayMs) + "ms");
       Serial.println("  - Bag Detection Delay: " + String(::bagDetectionDelay) + "ms");
       Serial.println("  - Min Bag Interval: " + String(::minBagInterval) + "ms");
       Serial.println("  - Auto Reset: " + String(::autoReset ? "true" : "false"));
+      Serial.println("  - Relay Delay After Complete: " + String(::relayDelayAfterComplete) + "ms");
       if (ethIP.length() > 0) {
         Serial.println("  - Ethernet IP: " + ethIP);
       }
@@ -4975,6 +4997,7 @@ void setup() {
   debounceDelay = sensorDelayMs;
   
   Serial.println("✅ All configurations loaded and verified:");
+  Serial.println("  - location: " + location);
   Serial.println("  - conveyorName: " + conveyorName);
   Serial.println("  - brightness: " + String(displayBrightness) + "%");
   Serial.println("  - sensorDelay: " + String(sensorDelayMs) + "ms");
@@ -4983,7 +5006,7 @@ void setup() {
   Serial.println("  - autoReset: " + String(autoReset ? "true" : "false"));
   Serial.println("  - products: " + String(productsData.size()) + " items");
   Serial.println("  - orders: " + String(ordersData.size()) + " items");
-  
+  Serial.println("  - relayDelayAfterComplete: " + String(relayDelayAfterComplete) + "ms");
   // BƯỚC 3: Khởi tạo hardware
   pinMode(SENSOR_PIN, INPUT_PULLUP);
   pinMode(TRIGGER_SENSOR_PIN, INPUT);
