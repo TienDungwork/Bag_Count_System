@@ -856,6 +856,14 @@ input[type="checkbox"] {
   transform: translateY(-3px) scale(1.05);
 }
 
+/* Trạng thái mờ cho action buttons */
+.action-btn.dimmed {
+  opacity: 0.5;
+  pointer-events: none;
+  transform: none !important;
+  box-shadow: none !important;
+}
+
 .start-btn:hover { box-shadow: 0 8px 25px rgba(40, 167, 69, 0.4); }
 .pause-btn:hover { box-shadow: 0 8px 25px rgba(255, 193, 7, 0.4); }
 .stop-btn:hover { box-shadow: 0 8px 25px rgba(220, 53, 69, 0.4); }
