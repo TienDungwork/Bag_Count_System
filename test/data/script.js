@@ -880,6 +880,7 @@ async function handleCountUpdate(data) {
   
   try {
     console.log('⚡ MQTT Real-time count:', data.count, 'type:', data.type, 'productCode:', data.productCode, 'progress:', data.progress + '%');
+    console.log('🔍 countingState.isActive:', countingState.isActive);
 
     // ⚡ MQTT-ONLY REAL-TIME COUNT UPDATE - No API fallback to prevent overwrites
     if (data.count !== undefined) {
@@ -2235,11 +2236,11 @@ function getStatusDisplay(status) {
 // Counting Control (Updated)
 // 🔄 Hybrid Functions (MQTT preferred, API fallback)
 async function startCounting() {
-  console.log('Starting counting...');
-  console.log('Current orderBatches:', orderBatches);
+  console.log('� Starting counting...');
+  console.log('🔴 Current orderBatches:', orderBatches);
   
   let activeBatch = orderBatches.find(b => b.isActive);
-  // console.log('Active batch:', activeBatch);
+  console.log('🔴 Active batch:', activeBatch);
   
   // Nếu không có batch active, thử active batch đầu tiên có orders
   if (!activeBatch && orderBatches.length > 0) {

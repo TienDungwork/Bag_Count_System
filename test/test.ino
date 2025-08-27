@@ -4638,8 +4638,8 @@ void updateCount() {
       }
     }
     
-    // Kiểm tra đạt mục tiêu
-    if (totalCount >= targetCount) {
+    // Kiểm tra đạt mục tiêu - CHỈ KHI CÓ TARGET HỢP LỆ VÀ ĐÃ THỰC SỰ ĐẾM
+    if (totalCount >= targetCount && targetCount > 0 && totalCount > 0) {
       isLimitReached = true;
       finishedBlinking = false;
       blinkCount = 0;
@@ -4674,8 +4674,9 @@ void updateCount() {
       // MQTT: Publish final status
       publishStatusMQTT();
       
-      // Auto Reset nếu được bật từ settings - CHỈ RESET ĐơN HÀNG HIỆN TẠI
-      if (autoReset && totalCount >= targetCount) {
+      // Auto Reset nếu được bật từ settings - CHỈ RESET ĐƠN HÀNG HIỆN TẠI
+      // THÊM CHECK: Chỉ auto reset khi thực sự hoàn thành đơn hàng (target > 0 và đã đếm xong)
+      if (autoReset && totalCount >= targetCount && targetCount > 0 && totalCount > 0) {
         Serial.println("✅ Auto Reset enabled - resetting CURRENT ORDER only");
         delay(2000); // Chờ 2 giây để hiển thị kết quả hoàn thành
         
