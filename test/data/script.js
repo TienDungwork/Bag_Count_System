@@ -456,25 +456,39 @@ async function deleteProductFromESP32(productId) {
 // Xóa order batch từ ESP32
 async function deleteBatchFromESP32(batchId) {
   try {
-    console.log('Deleting batch from ESP32:', batchId);
+    console.log('=== ESP32 Batch Deletion Process ===');
+    console.log('Sending clear_batch command to ESP32 for batch:', batchId);
+    console.log('Command payload:', { cmd: 'clear_batch', batchId: batchId });
     
-    const response = await fetch(`/api/orders/${batchId}`, {
-      method: 'DELETE',
+    const response = await fetch('/api/cmd', {
+      method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-      }
+      },
+      body: JSON.stringify({
+        cmd: 'clear_batch',
+        batchId: batchId
+      })
     });
     
+    console.log('ESP32 response status:', response.status);
+    console.log('ESP32 response ok:', response.ok);
+    
     if (response.ok) {
-      const result = await response.json();
-      console.log('Batch deleted from ESP32:', result);
+      const result = await response.text();
+      console.log('ESP32 response body:', result);
+      console.log('✅ Batch cleared from ESP32 successfully');
       return true;
     } else {
-      throw new Error(`HTTP error! status: ${response.status}`);
+      const errorText = await response.text();
+      console.error('❌ ESP32 error response:', errorText);
+      throw new Error(`HTTP error! status: ${response.status}, body: ${errorText}`);
     }
     
   } catch (error) {
-    console.error('Error deleting batch from ESP32:', error);
+    console.error('❌ Error clearing batch from ESP32:', error);
+    console.error('   - Error type:', error.constructor.name);
+    console.error('   - Error message:', error.message);
     return false;
   }
 }
@@ -1833,15 +1847,42 @@ function clearBatch() {
   
   // Nếu đã chọn batch, xóa batch đó
   const batchToDelete = orderBatches.find(b => b.name === selectedBatchName); // Tìm theo tên
-  if (!batchToDelete) return;
+  if (!batchToDelete) {
+    console.error('Batch not found with name:', selectedBatchName);
+    showNotification('Không tìm thấy danh sách để xóa!', 'error');
+    return;
+  }
+  
+  console.log('DEBUG: Found batch to delete:', batchToDelete);
+  console.log('   - Batch ID:', batchToDelete.id);
+  console.log('   - Batch name:', batchToDelete.name);
+  console.log('   - Orders count:', batchToDelete.orders?.length || 0);
   
   if (confirm(`Bạn có chắc chắn muốn xóa danh sách "${batchToDelete.name}"?`)) {
-    // Xóa batch được chọn
+    console.log('User confirmed deletion, proceeding...');
+    
+    // Xóa batch được chọn từ local array
+    const originalLength = orderBatches.length;
     orderBatches = orderBatches.filter(b => b.name !== selectedBatchName); // Xóa theo tên
+    console.log('Local batch deleted. Original count:', originalLength, 'New count:', orderBatches.length);
+    
     saveOrderBatches();
+    console.log('Local storage updated');
     
     // GỬI LỆNH XÓA BATCH ĐẾN ESP32
-    deleteBatchFromESP32(batchToDelete.id);
+    console.log('Sending delete command to ESP32 for batch ID:', batchToDelete.id);
+    deleteBatchFromESP32(batchToDelete.id).then(success => {
+      if (success) {
+        console.log('ESP32 batch deletion successful');
+        showNotification(`Đã xóa danh sách "${batchToDelete.name}" khỏi thiết bị!`, 'success');
+      } else {
+        console.error('ESP32 batch deletion failed');
+        showNotification(`Đã xóa local nhưng lỗi xóa từ thiết bị: "${batchToDelete.name}"`, 'warning');
+      }
+    }).catch(error => {
+      console.error('ESP32 batch deletion error:', error);
+      showNotification(`Lỗi xóa từ thiết bị: ${error.message}`, 'error');
+    });
     
     // Reset selection
     select.value = '';
@@ -2135,7 +2176,7 @@ function selectOrder(orderId, checked) {
         customerName: order.customerName,
         orderCode: order.orderCode,
         target: plannedQuantity,
-        warningQuantity: 5, // Mặc định 5 cho warning
+        warningQuantity: order.warningQuantity || 5, // Sử dụng warningQuantity của đơn hàng
         keepCount: false, // Reset count khi chọn đơn mới
         isRunning: false  // Chỉ set order info, chưa chạy
       }).catch(error => {
@@ -2466,7 +2507,7 @@ async function startCounting() {
       productName: productName,
       productCode: productCode,
       target: currentOrder.quantity,
-      warningQuantity: 5,
+      warningQuantity: currentOrder.warningQuantity || 5,  // Sử dụng warningQuantity của đơn hàng
       keepCount: false, // Reset count khi bắt đầu mới
       isRunning: true   // Đảm bảo ESP32 biết đang chạy
     });

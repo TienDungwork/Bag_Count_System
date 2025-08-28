@@ -163,8 +163,8 @@ PubSubClient mqtt(ethClient);
 int bagDetectionDelay;              // Thời gian xác nhận 1 bao (ms) - LOADED FROM FILE
 int minBagInterval;                 // Khoảng cách tối thiểu giữa 2 bao (ms) - LOADED FROM FILE  
 bool autoReset;                     // Tự động reset sau khi hoàn thành - LOADED FROM FILE
-String conveyorName;                // Tên băng tải - LOADED FROM FILE
-String location;                    // Địa điểm - LOADED FROM FILE
+String conveyorName;  // Tên băng tải - LOADED FROM FILE
+String location;      // Địa điểm - LOADED FROM FILE
 int displayBrightness;              // Độ sáng LED matrix (10-100%) - LOADED FROM FILE
 int sensorDelayMs;                  // Độ trễ cảm biến (ms) - LOADED FROM FILE
 int relayDelayAfterComplete;        // Thời gian relay chạy thêm sau khi hoàn thành (ms) - LOADED FROM FILE
@@ -179,6 +179,11 @@ bool waitingForInterval = false;    // Đang chờ khoảng cách tối thiểu
 unsigned long orderCompleteTime = 0;    // Thời gian hoàn thành đơn hàng
 bool isOrderComplete = false;           // Đã hoàn thành đơn hàng
 bool isRelayDelayActive = false;        // Đang trong thời gian delay relay
+
+// Warning threshold LED control variables
+unsigned long warningLedStartTime = 0;   // Thời gian bắt đầu bật LED cảnh báo
+bool isWarningLedActive = false;         // Đang trong trạng thái cảnh báo
+bool hasReachedWarningThreshold = false; // Đã đạt ngưỡng cảnh báo
 
 //----------------------------------------
 #define PANEL_RES_X 64
@@ -199,6 +204,8 @@ struct HistoryItem {
 std::vector<HistoryItem> history;
 String bagType = "bao";
 String productCode = "";  // Mã sản phẩm hiện tại được hiển thị trên LED
+String orderCode = "";    // Mã đơn hàng hiện tại
+String customerName = ""; // Tên khách hàng hiện tại
 int targetCount = 20;
 std::vector<String> bagTypes;
 
@@ -493,15 +500,38 @@ void loadCurrentOrderForDisplay() {
         }
         
         int quantity = order["quantity"] | 20;
+        int warningQuantity = order["warningQuantity"].as<int>() | 5; // Mặc định 5 nếu không có
         
         bagType = productName;
         productCode = productCodeFromOrder;
+        
+        // Cập nhật biến global cho API customer
+        if (order.containsKey("orderCode")) {
+          orderCode = order["orderCode"].as<String>();
+          Serial.println("Updated global orderCode: " + orderCode);
+        }
+        if (order.containsKey("customerName")) {
+          customerName = order["customerName"].as<String>();
+          Serial.println("Updated global customerName: " + customerName);
+        }
+        
         targetCount = quantity;
+        
+        // Cập nhật bagConfig với warningQuantity từ order
+        for (auto& cfg : bagConfigs) {
+          if (cfg.type == productName) {
+            cfg.target = quantity;
+            cfg.warn = warningQuantity;
+            Serial.println("Updated bagConfig warning threshold to: " + String(warningQuantity));
+            break;
+          }
+        }
         
         Serial.println("Loaded order for display:");
         Serial.println("   Product: " + productName);
         Serial.println("   Code: " + productCodeFromOrder);
         Serial.println("   Target: " + String(quantity));
+        Serial.println("   Warning: " + String(warningQuantity));
         
         needUpdate = true;
         return;
@@ -576,6 +606,12 @@ void handleWebCommand(int button) {
       isRelayDelayActive = false;
       orderCompleteTime = 0;
       Serial.println("🔌 RELAY DELAY STATE CLEARED (manual reset)");
+      
+      // CLEAR WARNING THRESHOLD STATE
+      isWarningLedActive = false;
+      hasReachedWarningThreshold = false;
+      warningLedStartTime = 0;
+      Serial.println("⚠️ WARNING LED STATE CLEARED (manual reset)");
       
       for (auto& cfg : bagConfigs) {
         cfg.status = "RESET";
@@ -757,11 +793,11 @@ void loadSettingsFromFile() {
       Serial.println("Found settings file, loading saved values:");
       
       // Load Ethernet IP config
-      String ethIP = doc["ipAddress"];
-      String ethGateway = doc["gateway"];
-      String ethSubnet = doc["subnet"];
-      String ethDNS1 = doc["dns1"];
-      String ethDNS2 = doc["dns2"];
+  String ethIP = doc["ipAddress"].as<String>();
+  String ethGateway = doc["gateway"].as<String>();
+  String ethSubnet = doc["subnet"].as<String>();
+  String ethDNS1 = doc["dns1"].as<String>();
+  String ethDNS2 = doc["dns2"].as<String>();
       
       if (ethIP.length() > 0) {
         IPAddress newIP, newGateway, newSubnet, newDNS1, newDNS2;
@@ -1203,11 +1239,11 @@ void loadWiFiConfig() {
         wifi_use_static_ip = doc["use_static_ip"] | false;
         
         if (wifi_use_static_ip) {
-          String ip_str = doc["static_ip"];
-          String gateway_str = doc["gateway"];
-          String subnet_str = doc["subnet"];
-          String dns1_str = doc["dns1"];
-          String dns2_str = doc["dns2"];
+          String ip_str = doc["static_ip"].as<String>();
+          String gateway_str = doc["gateway"].as<String>();
+          String subnet_str = doc["subnet"].as<String>();
+          String dns1_str = doc["dns1"].as<String>();
+          String dns2_str = doc["dns2"].as<String>();
           
           // Only override defaults if valid values are provided
           if (ip_str.length() > 0) wifi_static_ip.fromString(ip_str);
@@ -1518,7 +1554,7 @@ void onMqttMessage(char* topic, byte* payload, unsigned int length) {
     // Kiểm tra source để tránh xử lý lại lệnh từ chính mình
     DynamicJsonDocument sourceDoc(256);
     if (deserializeJson(sourceDoc, message) == DeserializationError::Ok) {
-      String source = sourceDoc["source"];
+  String source = sourceDoc["source"].as<String>();
       if (source == "IR_REMOTE") {
         Serial.println("Ignoring START command from own IR remote");
         return;
@@ -1531,7 +1567,7 @@ void onMqttMessage(char* topic, byte* payload, unsigned int length) {
     // Kiểm tra source để tránh xử lý lại lệnh từ chính mình
     DynamicJsonDocument sourceDoc(256);
     if (deserializeJson(sourceDoc, message) == DeserializationError::Ok) {
-      String source = sourceDoc["source"];
+  String source = sourceDoc["source"].as<String>();
       if (source == "IR_REMOTE") {
         Serial.println("Ignoring PAUSE command from own IR remote");
         return;
@@ -1544,7 +1580,7 @@ void onMqttMessage(char* topic, byte* payload, unsigned int length) {
     // Kiểm tra source để tránh xử lý lại lệnh từ chính mình
     DynamicJsonDocument sourceDoc(256);
     if (deserializeJson(sourceDoc, message) == DeserializationError::Ok) {
-      String source = sourceDoc["source"];
+  String source = sourceDoc["source"].as<String>();
       if (source == "IR_REMOTE") {
         Serial.println("Ignoring RESET command from own IR remote");
         return;
@@ -1558,7 +1594,7 @@ void onMqttMessage(char* topic, byte* payload, unsigned int length) {
     // Parse JSON để chọn đơn hàng
     DynamicJsonDocument doc(256);
     if (deserializeJson(doc, message) == DeserializationError::Ok) {
-      String orderType = doc["type"];
+  String orderType = doc["type"].as<String>();
       int target = doc["target"] | 20;
       int warn = doc["warn"] | 10;
       
@@ -1986,6 +2022,18 @@ void setupWebServer() {
       server.send(404, "text/plain", "JS not found");
     }
   });
+
+  // Serve test customer API page
+  server.on("/test-customer-api", HTTP_GET, [](){
+    if (LittleFS.exists("/test_customer_api.html")) {
+      File file = LittleFS.open("/test_customer_api.html", "r");
+      server.streamFile(file, "text/html");
+      file.close();
+      Serial.println("Served test_customer_api.html from LittleFS");
+    } else {
+      server.send(404, "text/plain", "Test customer API page not found");
+    }
+  });
   
   // API trạng thái hiện tại - Real-time polling
   server.on("/api/status", HTTP_GET, [](){
@@ -2194,8 +2242,8 @@ void setupWebServer() {
       DynamicJsonDocument doc(512);
       deserializeJson(doc, server.arg("plain"));
       
-      String productCode = doc["productCode"];
-      String customerName = doc["customerName"]; 
+  String productCode = doc["productCode"].as<String>();
+  String customerName = doc["customerName"].as<String>(); 
       int quantity = doc["quantity"];
       String notes = doc["notes"] | "";
       
@@ -2288,6 +2336,12 @@ void setupWebServer() {
         orderCompleteTime = 0;
         Serial.println("RELAY DELAY STATE CLEARED (count reset)");
         
+        // CLEAR WARNING THRESHOLD STATE (khi reset count)
+        isWarningLedActive = false;
+        hasReachedWarningThreshold = false;
+        warningLedStartTime = 0;
+        Serial.println("⚠️ WARNING LED STATE CLEARED (count reset)");
+        
         // GIỮ NGUYÊN TRẠNG THÁI isRunning, isTriggerEnabled
         // CHỈ CẬP NHẬT COUNT DISPLAY
         updateDoneLED();
@@ -2296,9 +2350,9 @@ void setupWebServer() {
         Serial.println("Count reset to 0, keeping current running state");
       } else if (cmd == "set_current_order") {
         // Cập nhật thông tin đơn hàng hiện tại để hiển thị trên LED
-        String productName = doc["productName"];
-        String customerName = doc["customerName"];
-        String orderCode = doc["orderCode"];
+  String productName = doc["productName"].as<String>();
+  String customerName = doc["customerName"].as<String>();
+  String orderCode = doc["orderCode"].as<String>();
         String productCodeFromWeb = doc["productCode"].as<String>();  // Nhận mã sản phẩm từ web
         int target = doc["target"] | 20;
         int warningQuantity = doc["warningQuantity"] | 5;
@@ -2318,7 +2372,11 @@ void setupWebServer() {
         // Cập nhật biến hiển thị
         bagType = productName;
         productCode = productCodeFromWeb;  // Cập nhật mã sản phẩm
-        targetCount = target;
+        orderCode = doc["orderCode"].as<String>();      // Cập nhật biến global
+        customerName = doc["customerName"].as<String>(); // Cập nhật biến global
+        Serial.println("Updated global orderCode: " + orderCode);
+        Serial.println("Updated global customerName: " + customerName);
+        targetCount = target; 
         
         // KHÔNG RESET COUNT NẾU keepCount = true (cho multi-order)
         if (!keepCount) {
@@ -2370,20 +2428,20 @@ void setupWebServer() {
           needUpdate = true;
           updateDisplay();
           
-          Serial.println("📱 Mode changed to: " + mode);
-          Serial.println("✅ Display updated with new mode");
+          Serial.println("Mode changed to: " + mode);
+          Serial.println("Display updated with new mode");
         } else {
-          Serial.println("❌ Invalid mode: " + mode);
+          Serial.println("Invalid mode: " + mode);
           server.send(400, "application/json", "{\"status\":\"Error\",\"message\":\"Invalid mode. Use 'output' or 'input'\"}");
           return;
         }
       } else if (cmd == "next_order") {
-        // XỬ LÝ CHUYỂN SANG ĐƠN HÀNG TIẾP THEO
+        // XỬ LÝ CHUYỂN SANG ĐƠN HÀNG TIẾP TH--EO
         Serial.println("Next order command received");
         
-        String productName = doc["productName"];
-        String customerName = doc["customerName"];
-        String orderCode = doc["orderCode"];
+  String productName = doc["productName"].as<String>();
+  String customerName = doc["customerName"].as<String>();
+  String orderCode = doc["orderCode"].as<String>();
         String productCodeFromWeb = doc["productCode"].as<String>();  // Nhận mã sản phẩm từ web
         int target = doc["target"] | 20;
         int warningQuantity = doc["warningQuantity"] | 5;
@@ -2400,6 +2458,10 @@ void setupWebServer() {
         // CẬP NHẬT THÔNG TIN ĐƠN HÀNG MỚI
         bagType = productName;
         productCode = productCodeFromWeb;  // Cập nhật mã sản phẩm
+        orderCode = doc["orderCode"].as<String>();      // Cập nhật biến global
+        customerName = doc["customerName"].as<String>(); // Cập nhật biến global
+        Serial.println("Updated global orderCode: " + orderCode);
+        Serial.println("Updated global customerName: " + customerName);
         targetCount = target;
         
         // KHÔNG RESET COUNT NẾU keepCount = true (để tiếp tục đếm multi-order)
@@ -2456,7 +2518,8 @@ void setupWebServer() {
         String type = doc["type"];
         int target = doc["target"] | 20;
         int warn = doc["warn"] | 10;
-        String orderCode = doc["orderCode"];
+        orderCode = doc["orderCode"].as<String>();  // Cập nhật biến global
+        Serial.println("Updated global orderCode: " + orderCode);
         
         // Cập nhật hoặc tạo mới bagConfig cho đơn hàng này
         bool found = false;
@@ -2596,6 +2659,79 @@ void setupWebServer() {
         Serial.println("   MQTT connected: " + String(mqtt.connected()));
         server.send(200, "text/plain", "TEST OK - Check Serial Monitor for details");
         return;
+      } else if (cmd == "clear_batch") {
+        // XỬ LÝ LỆNH XÓA BATCH
+        Serial.println("=== CLEAR BATCH COMMAND RECEIVED ===");
+        Serial.println("Command payload:");
+        String debugPayload;
+        serializeJson(doc, debugPayload);
+        Serial.println(debugPayload);
+        
+        int batchId = doc["batchId"] | 0;
+        Serial.println("Extracted batch ID: " + String(batchId));
+        
+        if (batchId > 0) {
+          Serial.println("Processing clear batch for ID: " + String(batchId));
+          Serial.println("Current ordersData size: " + String(ordersData.size()));
+          
+          // Debug: Log all existing batch IDs
+          Serial.println("Existing batch IDs in ordersData:");
+          for (size_t i = 0; i < ordersData.size(); i++) {
+            int existingId = ordersData[i]["id"] | 0;
+            String existingName = ordersData[i]["name"] | "Unknown";
+            Serial.println("   Batch " + String(i) + ": ID=" + String(existingId) + ", Name=" + existingName);
+          }
+          
+          // Tìm và xóa batch từ ordersData
+          bool found = false;
+          for (size_t i = 0; i < ordersData.size(); i++) {
+            int currentBatchId = ordersData[i]["id"] | 0;
+            if (currentBatchId == batchId) {
+              String batchName = ordersData[i]["name"] | "Unknown";
+              ordersData.remove(i);
+              found = true;
+              Serial.println("✅ BATCH FOUND AND REMOVED:");
+              Serial.println("   - Batch ID: " + String(batchId));
+              Serial.println("   - Batch Name: " + batchName);
+              Serial.println("   - Removed from index: " + String(i));
+              break;
+            }
+          }
+          
+          if (found) {
+            // Lưu thay đổi vào file
+            saveOrdersToFile();
+            Serial.println("✅ Orders file updated after batch deletion");
+            
+            // Reset trạng thái nếu batch đang active
+            if (currentBatchId == String(batchId)) {
+              currentBatchId = "";
+              batchTotalTarget = 0;
+              bagType = "bao";
+              targetCount = 20;
+              isRunning = false;
+              isTriggerEnabled = false;
+              isCountingEnabled = false;
+              totalCount = 0;
+              isLimitReached = false;
+              updateStartLED();
+              updateDoneLED();
+              needUpdate = true;
+              Serial.println("✅ ESP32 state reset after clearing active batch");
+            }
+            
+            Serial.println("✅ Batch cleared successfully from ESP32");
+            server.send(200, "application/json", "{\"status\":\"OK\",\"message\":\"Batch cleared successfully\",\"batchId\":" + String(batchId) + "}");
+          } else {
+            Serial.println("❌ BATCH NOT FOUND:");
+            Serial.println("   - Requested batch ID: " + String(batchId));
+            Serial.println("   - Available batches: " + String(ordersData.size()));
+            server.send(404, "application/json", "{\"status\":\"Error\",\"message\":\"Batch not found\",\"batchId\":" + String(batchId) + "}");
+          }
+        } else {
+          Serial.println("❌ Invalid batch ID for clear operation: " + String(batchId));
+          server.send(400, "application/json", "{\"status\":\"Error\",\"message\":\"Invalid batch ID\",\"received\":" + String(batchId) + "}");
+        }
       } else if (cmd == "UPDATE_ORDER") {
         // XỬ LÝ CẬP NHẬT ORDER
         Serial.println("Processing UPDATE_ORDER command...");
@@ -2952,12 +3088,24 @@ void setupWebServer() {
         return;
       }
       
-      String customerName = doc["customerName"];
-      String orderCode = doc["orderCode"];
+      customerName = doc["customerName"].as<String>();  // Cập nhật biến global
+      orderCode = doc["orderCode"].as<String>();        // Cập nhật biến global
+      Serial.println("Updated global customerName: " + customerName);
+      Serial.println("Updated global orderCode: " + orderCode);
       String vehicleNumber = doc["vehicleNumber"];
       String productName = doc["productName"];
       int quantity = doc["quantity"];
       int warningQuantity = doc["warningQuantity"];
+      
+      // DEBUG: Log received data
+      Serial.println("DEBUG: Received new order data:");
+      Serial.println("  Customer: " + customerName);
+      Serial.println("  OrderCode: " + orderCode);
+      Serial.println("  Vehicle: " + vehicleNumber);
+      Serial.println("  Product: " + productName);
+      Serial.println("  Quantity: " + String(quantity));
+      Serial.println("  WarningQuantity: " + String(warningQuantity));
+      Serial.println("  WarningQuantity (raw): " + doc["warningQuantity"].as<String>());
       
       // Feed watchdog to prevent timeout
       yield();
@@ -2965,10 +3113,11 @@ void setupWebServer() {
       // Tạo BagConfig mới từ đơn hàng - LUÔN LUÔN TẠO MỚI để cho phép nhiều đơn hàng cùng sản phẩm
       BagConfig newConfig;
       // Sử dụng productCode thay vì orderCode để đảm bảo unique cho từng đơn hàng
-      String productCode = doc["product"]["code"].as<String>();
+      productCode = doc["product"]["code"].as<String>();  // Cập nhật biến global
       if (productCode.length() == 0) {
         productCode = String(millis()); // Fallback nếu không có productCode
       }
+      Serial.println("Updated global productCode: " + productCode);
       newConfig.type = productName + "_" + productCode; // Sử dụng productCode để unique
       newConfig.target = quantity;
       newConfig.warn = warningQuantity;
@@ -3379,8 +3528,8 @@ void setupWebServer() {
       DynamicJsonDocument doc(512);
       deserializeJson(doc, server.arg("plain"));
       
-      String ssid = doc["ssid"];
-      String password = doc["password"];
+  String ssid = doc["ssid"].as<String>();
+  String password = doc["password"].as<String>();
       bool useStaticIP = doc["use_static_ip"] | false;
       String staticIP = doc["static_ip"];
       String gateway = doc["gateway"];
@@ -4024,10 +4173,11 @@ void setupWebServer() {
                 productCode = order["product"]["code"].as<String>();
               }
               int quantity = order["quantity"].as<int>();
+              int warningQuantity = order["warningQuantity"].as<int>();
               
               Serial.println("     Order " + String(i + 1) + ": orderCode=" + orderCode + 
                            ", productName=" + productName + ", productCode=" + productCode +
-                           ", qty=" + String(quantity));
+                           ", qty=" + String(quantity) + ", warning=" + String(warningQuantity));
             }
           } else {
             Serial.println("   - No orders array found or empty!");
@@ -4049,10 +4199,11 @@ void setupWebServer() {
                 productCode = copiedOrder["product"]["code"].as<String>();
               }
               int quantity = copiedOrder["quantity"].as<int>();
+              int warningQuantity = copiedOrder["warningQuantity"].as<int>();
               
               Serial.println("     Copied Order " + String(i + 1) + ": orderCode=" + orderCode + 
                            ", productName=" + productName + ", productCode=" + productCode +
-                           ", qty=" + String(quantity));
+                           ", qty=" + String(quantity) + ", warning=" + String(warningQuantity));
             }
           }
           
@@ -4382,10 +4533,70 @@ void setupWebServer() {
     server.send(200);
   });
 
+  // API cho khách hàng lấy thông tin 7 trường dữ liệu chính
+  server.on("/api/customer/info", HTTP_GET, [](){
+    Serial.println("=== Customer Info API Called ===");
+    Serial.println("Current values:");
+    Serial.println("  orderCode: " + orderCode);
+    Serial.println("  productCode: " + productCode);
+    Serial.println("  customerName: " + customerName);
+    Serial.println("  startTime: " + startTimeStr);
+    Serial.println("  currentMode: " + currentMode);
+    Serial.println("  location: " + location);
+    Serial.println("  conveyorName: " + conveyorName);
+    
+    server.sendHeader("Access-Control-Allow-Origin", "*");
+    server.sendHeader("Cache-Control", "no-cache, no-store, must-revalidate");
+    
+    DynamicJsonDocument doc(1024);
+    
+    // 1. orderCode - Mã đơn hàng hiện tại
+    doc["orderCode"] = orderCode;
+    
+    // 2. productGroup - Nhóm sản phẩm (từ sản phẩm hiện tại)
+    String currentProductGroup = "";
+    if (productCode.length() > 0) {
+      // Tìm productGroup từ productsData
+      JsonArray products = productsData.as<JsonArray>();
+      for (JsonObject product : products) {
+        if (product["code"] == productCode) {
+          currentProductGroup = product["group"] | "";
+          break;
+        }
+      }
+    }
+    doc["productGroup"] = currentProductGroup;
+    
+    // 3. productCode - Mã sản phẩm hiện tại
+    doc["productCode"] = productCode;
+    
+    // 4. customerName - Tên khách hàng hiện tại
+    doc["customerName"] = customerName;
+    
+    // 5. startTime - Thời gian bắt đầu đếm
+    doc["startTime"] = startTimeStr;
+    
+    // 6. setMode - Chế độ hiển thị hiện tại
+    doc["setMode"] = currentMode;
+    
+    // 7. location - Địa điểm đặt băng tải
+    doc["location"] = location;
+    
+    
+    String out;
+    serializeJson(doc, out);
+    server.send(200, "application/json", out);
+    
+    Serial.println("Customer info API response sent successfully");
+    Serial.println("Response JSON: " + out);
+    Serial.println("=== End Customer Info API ===");
+  });
+
   server.begin();
   Serial.println("WebServer started");
   Serial.println("Access web interface at: http://192.168.4.1/");
   Serial.println("Test page at: http://192.168.4.1/test");
+  Serial.println("Test Customer API at: http://192.168.4.1/test-customer-api");
 }
 
 //----------------------------------------Display Functions
@@ -4752,6 +4963,33 @@ void updateCount() {
                 newProductCode = order["product"]["code"].as<String>();
               }
               int quantity = order["quantity"] | 1;
+              int warningQuantity = order["warningQuantity"].as<int>() | 5; // Mặc định 5 nếu không có
+              
+              Serial.println("Found next order with warningQuantity: " + String(warningQuantity));
+              
+              // Cập nhật hoặc tạo mới BagConfig với đúng warningQuantity
+              bool foundBagConfig = false;
+              for (auto& cfg : bagConfigs) {
+                if (cfg.type == productName) {
+                  cfg.target = quantity;
+                  cfg.warn = warningQuantity;  // Cập nhật warning từ order data
+                  cfg.status = "RUNNING";
+                  foundBagConfig = true;
+                  Serial.println("Updated existing bagConfig with warn: " + String(warningQuantity));
+                  break;
+                }
+              }
+              
+              if (!foundBagConfig) {
+                // Tạo mới bagConfig
+                BagConfig newCfg;
+                newCfg.type = productName;
+                newCfg.target = quantity;
+                newCfg.warn = warningQuantity;
+                newCfg.status = "RUNNING";
+                bagConfigs.push_back(newCfg);
+                Serial.println("Created new bagConfig with warn: " + String(warningQuantity));
+              }
               
               // Cập nhật trạng thái đơn cũ thành completed
               for (size_t x = 0; x < ordersData.size(); x++) {
@@ -4901,7 +5139,7 @@ void updateCount() {
 }
 
 void updateDoneLED() {
-  // Đèn DONE (GPIO 5) với logic Active HIGH - BẬT khi đạt ngưỡng cảnh báo
+  // Đèn DONE (GPIO 5) với logic Active HIGH - BẬT khi đạt ngưỡng cảnh báo hoặc hoàn thành
   doneLedOn = false; // Mặc định TẮT
   
   for (auto& cfg : bagConfigs) {
@@ -4909,20 +5147,67 @@ void updateDoneLED() {
       // Kiểm tra ngưỡng cảnh báo được set từ web
       int warningThreshold = cfg.target - cfg.warn;  // Số bao còn lại để cảnh báo
       
-      if (totalCount >= warningThreshold) {
-        doneLedOn = true;  // BẬT (HIGH) khi đạt ngưỡng cảnh báo
+      // Kiểm tra ngưỡng cảnh báo
+      if (totalCount >= warningThreshold && totalCount < cfg.target) {
+        // Đạt ngưỡng cảnh báo
+        if (!hasReachedWarningThreshold) {
+          // Lần đầu đạt ngưỡng cảnh báo
+          hasReachedWarningThreshold = true;
+          isWarningLedActive = true;
+          warningLedStartTime = millis();
+          doneLedOn = true;  // BẬT LED cảnh báo
+          Serial.println("🚨 WARNING THRESHOLD REACHED! LED ON for 5 seconds");
+          Serial.println("   Count: " + String(totalCount) + "/" + String(cfg.target) + 
+                        ", Warning at: " + String(warningThreshold));
+        } else if (isWarningLedActive) {
+          // Đang trong thời gian cảnh báo 5 giây
+          if (millis() - warningLedStartTime < 5000) {
+            doneLedOn = true;  // Giữ LED BẬT trong 5 giây
+          } else {
+            // Hết 5 giây, tắt LED cảnh báo
+            isWarningLedActive = false;
+            doneLedOn = false;
+            Serial.println("⏰ Warning LED timeout - LED OFF");
+          }
+        }
+      } else if (totalCount >= cfg.target) {
+        // Hoàn thành đơn hàng - BẬT LED liên tục
+        doneLedOn = true;
+        isWarningLedActive = false;  // Reset warning state
+        hasReachedWarningThreshold = false;
+        Serial.println("✅ ORDER COMPLETED - LED ON");
+      } else {
+        // Chưa đạt ngưỡng cảnh báo - TẮT LED
+        doneLedOn = false;
+        isWarningLedActive = false;
+        hasReachedWarningThreshold = false;
       }
       
       digitalWrite(DONE_LED_PIN, doneLedOn ? HIGH : LOW);  // Active HIGH logic
       
       // Debug info
       static bool lastDoneState = false;
-      if (doneLedOn != lastDoneState) {
+      static unsigned long lastDebugTime = 0;
+      if (doneLedOn != lastDoneState || (millis() - lastDebugTime > 10000)) {
         lastDoneState = doneLedOn;
-        Serial.println("DONE LED STATE: " + String(doneLedOn ? "ON" : "OFF") + 
+        lastDebugTime = millis();
+        
+        String reason = "";
+        if (totalCount >= cfg.target) {
+          reason = "COMPLETED";
+        } else if (isWarningLedActive) {
+          reason = "WARNING (5s timer)";
+        } else if (hasReachedWarningThreshold) {
+          reason = "WARNING (timeout)";
+        } else {
+          reason = "NORMAL";
+        }
+        
+        Serial.println("💡 DONE LED: " + String(doneLedOn ? "ON" : "OFF") + 
                       " - Count: " + String(totalCount) + 
                       "/" + String(cfg.target) + 
-                      ", Warning at: " + String(warningThreshold));
+                      ", Warning at: " + String(warningThreshold) +
+                      " (" + reason + ")");
       }
       break;
     }
@@ -5467,16 +5752,15 @@ void loop() {
   } else if (currentNetworkMode != WIFI_AP_MODE && mqtt.connected()) {
     // MQTT connected - handle messages
     mqtt.loop();
-    
+
     // Publish periodic updates
     if (millis() - lastMqttPublish > MQTT_PUBLISH_INTERVAL) {
       publishStatusMQTT();
-      
+
       // Publish sensor data nếu đang hoạt động
-      if (isCountingEnabled || isTriggerEnabled) {
+      if (isCountingEnabled || isTriggerEnabled)
         publishSensorData();
-      }
-      
+
       lastMqttPublish = millis();
     }
     
