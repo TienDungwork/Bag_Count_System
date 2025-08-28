@@ -2280,21 +2280,86 @@ void setupWebServer() {
   server.on("/api/history", HTTP_GET, [](){
     server.sendHeader("Access-Control-Allow-Origin", "*");
     
-    if (LittleFS.exists("/history.json")) {
-      File file = LittleFS.open("/history.json", "r");
-      if (file) {
-        String content = file.readString();
-        file.close();
-        server.send(200, "application/json", content);
-        Serial.println("History API called - returned data from file");
-      } else {
-        server.send(200, "application/json", "[]");
-        Serial.println("History API called - file exists but cannot read");
-      }
-    } else {
+    if (!LittleFS.exists("/history.json")) {
       server.send(200, "application/json", "[]");
       Serial.println("History API called - no history file found");
+      return;
     }
+
+    File file = LittleFS.open("/history.json", "r");
+    if (!file) {
+      server.send(200, "application/json", "[]");
+      Serial.println("History API called - file exists but cannot be opened");
+      return;
+    }
+
+    String content = file.readString();
+    file.close();
+
+    // Try to parse and normalize older formats into the expected rich format
+    DynamicJsonDocument doc(16384);
+    DeserializationError err = deserializeJson(doc, content);
+    if (err) {
+      // If parse fails, return raw content (best-effort)
+      Serial.println("History API: failed to parse JSON, returning raw content");
+      server.send(200, "application/json", content);
+      return;
+    }
+
+    DynamicJsonDocument outDoc(16384);
+    JsonArray out = outDoc.to<JsonArray>();
+
+    if (doc.is<JsonArray>()) {
+      JsonArray arr = doc.as<JsonArray>();
+      for (JsonVariant v : arr) {
+        JsonObject obj = out.createNestedObject();
+
+        // Normalize fields with fallbacks for old schema
+        const char* timestamp = v["timestamp"] | v["time"] | "";
+        const char* customer = v["customerName"] | v["customer"] | "";
+        const char* product = v["productName"] | v["product"] | v["batchType"] | "";
+        const char* orderCode = v["orderCode"] | "";
+        const char* vehicle = v["vehicleNumber"] | v["vehicle"] | "";
+        int planned = v["plannedQuantity"] | v["plannedQuantity"] | v["planned"] | v["target"] | 0;
+        int actual = v["actualCount"] | v["actual"] | v["totalCounted"] | v["count"] | 0;
+
+        obj["timestamp"] = timestamp;
+        obj["customerName"] = customer;
+        obj["productName"] = product;
+        obj["orderCode"] = orderCode;
+        obj["vehicleNumber"] = vehicle;
+        obj["plannedQuantity"] = planned;
+        obj["actualCount"] = actual;
+        obj["isBatch"] = v["isBatch"] | false;
+      }
+    } else if (doc.is<JsonObject>()) {
+      // Single object - normalize it into an array
+      JsonObject v = doc.as<JsonObject>();
+      JsonObject obj = out.createNestedObject();
+
+      const char* timestamp = v["timestamp"] | v["time"] | "";
+      const char* customer = v["customerName"] | v["customer"] | "";
+      const char* product = v["productName"] | v["product"] | v["batchType"] | "";
+      const char* orderCode = v["orderCode"] | "";
+      const char* vehicle = v["vehicleNumber"] | v["vehicle"] | "";
+      int planned = v["plannedQuantity"] | v["plannedQuantity"] | v["planned"] | v["target"] | 0;
+      int actual = v["actualCount"] | v["actual"] | v["totalCounted"] | v["count"] | 0;
+
+      obj["timestamp"] = timestamp;
+      obj["customerName"] = customer;
+      obj["productName"] = product;
+      obj["orderCode"] = orderCode;
+      obj["vehicleNumber"] = vehicle;
+      obj["plannedQuantity"] = planned;
+      obj["actualCount"] = actual;
+      obj["isBatch"] = v["isBatch"] | false;
+    }
+
+    // Serialize normalized array and send
+    String outStr;
+    serializeJson(outDoc, outStr);
+    server.send(200, "application/json", outStr);
+    Serial.println("History API called - returned normalized history array");
   });
 
   // API điều khiển cơ bản
@@ -4269,23 +4334,42 @@ void setupWebServer() {
   
   // API lưu/xóa history
   server.on("/api/history", HTTP_POST, [](){
+    // Allow cross-origin requests for clients that may not be served from the ESP
     server.sendHeader("Access-Control-Allow-Origin", "*");
-    
+    server.sendHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+    server.sendHeader("Access-Control-Allow-Headers", "Content-Type");
+
+    if (server.method() == HTTP_OPTIONS) {
+      // Preflight request
+      server.send(200, "application/json", "{}");
+      return;
+    }
+
     if (server.hasArg("plain")) {
       String jsonData = server.arg("plain");
       Serial.println("Receiving history from web: " + String(jsonData.length()) + " bytes");
-      
+      // Print first part of payload to aid debugging (avoid spamming very long payloads)
+      if (jsonData.length() > 1000) {
+        Serial.println("History payload (truncated 1st 1000 chars):");
+        Serial.println(jsonData.substring(0, 1000));
+      } else {
+        Serial.println("History payload:");
+        Serial.println(jsonData);
+      }
+
       // Lưu trực tiếp vào file (không cần parse vì ESP32 chỉ lưu trữ)
       File file = LittleFS.open("/history.json", "w");
       if (file) {
-        file.print(jsonData);
+        size_t written = file.print(jsonData);
         file.close();
-        Serial.println("History saved to ESP32");
+        Serial.println("History saved to ESP32, bytes written: " + String(written));
         server.send(200, "application/json", "{\"status\":\"OK\",\"message\":\"History saved\"}");
       } else {
+        Serial.println("ERROR: Failed to open /history.json for writing");
         server.send(500, "application/json", "{\"status\":\"Error\",\"message\":\"Failed to save history\"}");
       }
     } else {
+      Serial.println("WARNING: /api/history POST called with no body");
       server.send(400, "application/json", "{\"status\":\"Error\",\"message\":\"No data provided\"}");
     }
   });
@@ -4840,6 +4924,8 @@ void updateCount() {
     for (auto& cfg : bagConfigs) {
       if (cfg.type == bagType) {
         int warningThreshold = cfg.target - cfg.warn;
+        // DEBUG: print warning calculation details
+        Serial.println("DEBUG warning check: bagType=" + String(bagType) + ", totalCount=" + String(totalCount) + ", cfg.target=" + String(cfg.target) + ", cfg.warn=" + String(cfg.warn) + ", threshold=" + String(warningThreshold) + ", targetCount=" + String(targetCount));
         if (totalCount >= warningThreshold && totalCount < targetCount) {
           Serial.println("Đạt ngưỡng cảnh báo!");
           
@@ -4863,6 +4949,85 @@ void updateCount() {
       // Lưu lịch sử với thêm thông tin loại - chỉ khi có thời gian thực
       String currentTime = (time(nullptr) > 24 * 3600) ? getTimeStr() : "Time not synced";
       history.push_back({currentTime, (int)totalCount, bagType});
+
+      // Persist the new history entry to LittleFS (/history.json) immediately
+      // so the ESP32 keeps a local record even if the web UI doesn't push history.
+      {
+        DynamicJsonDocument histDoc(4096);
+        JsonArray histArr;
+
+        // Load existing history.json if present
+        if (LittleFS.exists("/history.json")) {
+          File hf = LittleFS.open("/history.json", "r");
+          if (hf) {
+            String content = hf.readString();
+            hf.close();
+            DeserializationError err = deserializeJson(histDoc, content);
+            if (!err && histDoc.is<JsonArray>()) {
+              histArr = histDoc.as<JsonArray>();
+            } else {
+              // Start fresh array if parse fails
+              histDoc.clear();
+              histArr = histDoc.to<JsonArray>();
+            }
+          } else {
+            histArr = histDoc.to<JsonArray>();
+          }
+        } else {
+          histArr = histDoc.to<JsonArray>();
+        }
+
+        // Try to find the current order details from ordersData so we can
+        // persist a richer history object (fields the web UI expects)
+        String customerName = "";
+        String productName = bagType;
+        String orderCode = "";
+        String vehicleNumber = "";
+        int plannedQuantity = 0;
+
+        for (size_t bi = 0; bi < ordersData.size(); bi++) {
+          JsonArray oarr = ordersData[bi]["orders"];
+          for (size_t oj = 0; oj < oarr.size(); oj++) {
+            JsonObject ord = oarr[oj];
+            bool selected = ord["selected"] | false;
+            String status = ord["status"] | "";
+            if (selected && (status == "counting" || status == "completed")) {
+              customerName = ord["customerName"] | "";
+              if (ord.containsKey("product") && ord["product"].is<JsonObject>() && ord["product"].containsKey("name")) {
+                productName = ord["product"]["name"].as<String>();
+              } else if (ord.containsKey("productName")) {
+                productName = ord["productName"].as<String>();
+              }
+              orderCode = ord["orderCode"] | "";
+              vehicleNumber = ord["vehicleNumber"] | "";
+              plannedQuantity = ord["quantity"] | 0;
+              break;
+            }
+          }
+          if (customerName.length() > 0) break;
+        }
+
+        // Append new entry with fields the web expects
+        JsonObject newEntry = histArr.createNestedObject();
+        newEntry["timestamp"] = currentTime;
+        newEntry["customerName"] = customerName;
+        newEntry["productName"] = productName;
+        newEntry["orderCode"] = orderCode;
+        newEntry["vehicleNumber"] = vehicleNumber;
+        newEntry["plannedQuantity"] = plannedQuantity;
+        newEntry["actualCount"] = (int)totalCount;
+        newEntry["batchType"] = bagType;
+
+        // Save back to file
+        File wf = LittleFS.open("/history.json", "w");
+        if (wf) {
+          size_t written = serializeJson(histArr, wf);
+          wf.close();
+          Serial.println("History persisted on ESP32, bytes written: " + String(written));
+        } else {
+          Serial.println("ERROR: Cannot open /history.json for writing history");
+        }
+      }
       
       // Đánh dấu DONE cho loại hiện tại
       for (auto& c : bagConfigs) {
@@ -5486,6 +5651,10 @@ void setup() {
 }
 
 void loop() {
+  // Ensure warning LED timeout is evaluated continuously so the LED will
+  // turn off after the configured 5 second window even when no new
+  // bag count events occur.
+  updateDoneLED();
   // Update LED display LUÔN LUÔN nếu cần thiết
   if (needUpdate || (millis() - lastUpdate > 1000)) { // Update mỗi 1 giây thay vì 2 giây
     updateDisplay();

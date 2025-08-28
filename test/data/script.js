@@ -55,11 +55,26 @@ document.addEventListener('DOMContentLoaded', async function() {
     console.log('Trying to load data from ESP32...');
     await loadAllDataFromESP32();
   } catch (error) {
-    console.log('ESP32 failed, loading from localStorage...');
-    loadSettings();
-    loadProducts();
-    loadOrderBatches();
-    loadHistory();
+    console.log('ESP32 failed to load all data, attempting to load history from ESP32 before falling back to localStorage...');
+    // Try to at least load history from ESP32 even if other endpoints failed.
+    try {
+      const historyLoaded = await loadHistoryFromESP32();
+      if (!historyLoaded) {
+        console.log('No history available from ESP32, loading everything from localStorage');
+        loadSettings();
+        loadProducts();
+        loadOrderBatches();
+        loadHistory();
+      } else {
+        console.log('History loaded from ESP32 despite partial failures');
+      }
+    } catch (e) {
+      console.log('Error while trying to load history from ESP32, falling back to localStorage');
+      loadSettings();
+      loadProducts();
+      loadOrderBatches();
+      loadHistory();
+    }
   }
   
   console.log('Updating UI components...');
@@ -105,6 +120,28 @@ document.addEventListener('DOMContentLoaded', async function() {
     getDeviceInfo();
   }, 2000);
   
+  // Ensure we always try to refresh history from ESP32 on startup so localStorage
+  // stale/empty data doesn't mask server-side history.
+  try {
+    await loadHistoryFromESP32();
+    updateHistoryTable();
+  } catch (e) {
+    console.warn('Could not load history from ESP32 on startup:', e);
+  }
+
+  // Ensure .history-items exists so the list view sync works
+  try {
+    const histContainer = document.querySelector('.history-list');
+    if (histContainer && !histContainer.querySelector('.history-items')) {
+      const wrapper = document.createElement('div');
+      wrapper.className = 'history-items';
+      wrapper.style.display = 'none'; // hidden by default, used as a programmatic target
+      histContainer.appendChild(wrapper);
+    }
+  } catch (e) {
+    console.warn('Could not ensure history-items container:', e);
+  }
+
   console.log('Application initialized successfully');
   // showNotification('Ứng dụng đã khởi tạo (MQTT Real-time mode)', 'success');
 });
@@ -265,17 +302,37 @@ async function loadHistoryFromESP32() {
     const response = await fetch('/api/history');
     if (response.ok) {
       const esp32History = await response.json();
-      if (esp32History && esp32History.length > 0) {
-        countingHistory = esp32History;
-        localStorage.setItem('countingHistory', JSON.stringify(countingHistory));
-        console.log('History loaded from ESP32:', esp32History.length, 'records');
-        return true;
-      }
+      // Always use server history (even if empty) to avoid localStorage masking server data
+      countingHistory = Array.isArray(esp32History) ? esp32History : [];
+      localStorage.setItem('countingHistory', JSON.stringify(countingHistory));
+      console.log('History loaded from ESP32 (may be empty):', countingHistory.length, 'records');
+      updateHistoryTable();
+      updateHistoryListElement();
+      return true;
     }
   } catch (error) {
     console.error('Error loading history from ESP32:', error);
   }
   return false;
+}
+
+// Ensure any other history-list UI (if present) is synchronized with countingHistory
+function updateHistoryListElement() {
+  const container = document.querySelector('.history-list');
+  if (!container) return;
+
+  // If this container has a plain list view fallback, try to populate it
+  const listEl = container.querySelector('.history-items');
+  if (!listEl) return;
+
+  listEl.innerHTML = '';
+  countingHistory.slice().reverse().forEach(item => {
+    const el = document.createElement('div');
+    el.className = 'history-item';
+    const time = item.timestamp ? new Date(item.timestamp).toLocaleString('vi-VN') : 'N/A';
+    el.innerHTML = `<strong>${item.customerName || 'N/A'}</strong> — ${item.productName || ''} <br><small>${time}</small>`;
+    listEl.appendChild(el);
+  });
 }
 
 // HÀM ĐỂ FORCE REFRESH TỪ ESP32 (DÙNG KHI CẦN RESET)
@@ -459,6 +516,8 @@ async function deleteBatchFromESP32(batchId) {
     console.log('=== ESP32 Batch Deletion Process ===');
     console.log('Sending clear_batch command to ESP32 for batch:', batchId);
     console.log('Command payload:', { cmd: 'clear_batch', batchId: batchId });
+  // DEBUG: show payload right before sending
+  console.debug('deleteBatchFromESP32 - about to POST /api/cmd', JSON.stringify({ cmd: 'clear_batch', batchId: batchId }));
     
     const response = await fetch('/api/cmd', {
       method: 'POST',
@@ -1509,11 +1568,11 @@ function createNewBatch() {
 function loadBatch() {
   console.log('loadBatch() called');
   const select = document.getElementById('currentBatchSelect');
-  const batchName = select.value; // Dùng tên batch thay vì ID
-  console.log('Selected batch name:', batchName);
-  
-  if (batchName) {
-    const batch = orderBatches.find(b => b.name === batchName); // Tìm theo tên
+  const batchId = select ? select.value : '';
+  console.log('Selected batch id:', batchId);
+
+  if (batchId) {
+    const batch = orderBatches.find(b => b.id == batchId); // Tìm theo id
     console.log('Found batch:', batch);
     if (batch) {
       currentBatchId = batch.id;
@@ -1832,10 +1891,27 @@ async function saveBatch() {
 }
 
 function clearBatch() {
-  const select = document.getElementById('batchSelector');
-  const selectedBatchName = select ? select.value : null; // Dùng tên batch thay vì ID
-  
-  if (!selectedBatchName) {
+  try {
+    const select = document.getElementById('batchSelector');
+    let selectedBatchId = select ? select.value : null; // dùng id làm value
+
+    // Fallbacks: if user selected batch in the Order tab or a batch was loaded into currentBatchId
+    if (!selectedBatchId) {
+      if (currentBatchId) {
+        console.log('clearBatch - falling back to currentBatchId:', currentBatchId);
+        selectedBatchId = currentBatchId;
+      } else {
+        const currentSelect = document.getElementById('currentBatchSelect');
+        if (currentSelect && currentSelect.value) {
+          console.log('clearBatch - falling back to currentBatchSelect value:', currentSelect.value);
+          selectedBatchId = currentSelect.value;
+        }
+      }
+    }
+
+    console.log('clearBatch() called', { selectedBatchId });
+
+  if (!selectedBatchId) {
     // Nếu chưa chọn batch nào, chỉ xóa đơn hàng đang tạo
     if (confirm('Bạn có chắc chắn muốn xóa tất cả đơn hàng trong danh sách hiện tại?')) {
       currentOrderBatch = [];
@@ -1844,11 +1920,11 @@ function clearBatch() {
     }
     return;
   }
-  
+
   // Nếu đã chọn batch, xóa batch đó
-  const batchToDelete = orderBatches.find(b => b.name === selectedBatchName); // Tìm theo tên
+  const batchToDelete = orderBatches.find(b => b.id == selectedBatchId); // Tìm theo id
   if (!batchToDelete) {
-    console.error('Batch not found with name:', selectedBatchName);
+  console.error('Batch not found with id:', selectedBatchId);
     showNotification('Không tìm thấy danh sách để xóa!', 'error');
     return;
   }
@@ -1858,20 +1934,20 @@ function clearBatch() {
   console.log('   - Batch name:', batchToDelete.name);
   console.log('   - Orders count:', batchToDelete.orders?.length || 0);
   
-  if (confirm(`Bạn có chắc chắn muốn xóa danh sách "${batchToDelete.name}"?`)) {
-    console.log('User confirmed deletion, proceeding...');
+    if (confirm(`Bạn có chắc chắn muốn xóa danh sách "${batchToDelete.name}"?`)) {
+      console.log('User confirmed deletion, proceeding...');
     
-    // Xóa batch được chọn từ local array
-    const originalLength = orderBatches.length;
-    orderBatches = orderBatches.filter(b => b.name !== selectedBatchName); // Xóa theo tên
+  // Xóa batch được chọn từ local array (theo id)
+  const originalLength = orderBatches.length;
+  orderBatches = orderBatches.filter(b => b.id != selectedBatchId); // Xóa theo id
     console.log('Local batch deleted. Original count:', originalLength, 'New count:', orderBatches.length);
     
     saveOrderBatches();
     console.log('Local storage updated');
     
     // GỬI LỆNH XÓA BATCH ĐẾN ESP32
-    console.log('Sending delete command to ESP32 for batch ID:', batchToDelete.id);
-    deleteBatchFromESP32(batchToDelete.id).then(success => {
+  console.log('Sending delete command to ESP32 for batch ID:', batchToDelete.id);
+  deleteBatchFromESP32(batchToDelete.id).then(success => {
       if (success) {
         console.log('ESP32 batch deletion successful');
         showNotification(`Đã xóa danh sách "${batchToDelete.name}" khỏi thiết bị!`, 'success');
@@ -1884,8 +1960,10 @@ function clearBatch() {
       showNotification(`Lỗi xóa từ thiết bị: ${error.message}`, 'error');
     });
     
-    // Reset selection
-    select.value = '';
+  // Reset selection (clear both selectors if present)
+  if (select) select.value = '';
+  const currentSelect = document.getElementById('currentBatchSelect');
+  if (currentSelect) currentSelect.value = '';
     currentOrderBatch = [];
     currentBatchId = null;
     
@@ -1900,7 +1978,11 @@ function clearBatch() {
     document.getElementById('batchInfo').style.display = 'none';
     document.getElementById('orderFormContainer').style.display = 'none';
     
-    showNotification(`Đã xóa danh sách "${batchToDelete.name}"!`, 'success');
+      showNotification(`Đã xóa danh sách "${batchToDelete.name}"!`, 'success');
+    }
+  } catch (err) {
+    console.error('Exception in clearBatch():', err);
+    showNotification('Lỗi khi thực thi xóa danh sách: ' + (err && err.message ? err.message : err), 'error');
   }
 }
 
@@ -1909,12 +1991,11 @@ function switchBatch() {
   if (!select || !select.value) {
     return;
   }
-  
-  const batchName = select.value; // Dùng tên batch thay vì ID
-  console.log('Switching to batch name:', batchName);
-  
-  if (batchName) {
-    const batch = orderBatches.find(b => b.name === batchName); // Tìm theo tên
+  const batchId = select.value; // Dùng id
+  console.log('Switching to batch id:', batchId);
+
+  if (batchId) {
+    const batch = orderBatches.find(b => b.id == batchId); // Tìm theo id
     if (batch) {
       // Set as active batch
       orderBatches.forEach(b => b.isActive = false);
@@ -1965,7 +2046,7 @@ function updateBatchSelector() {
   
   orderBatches.forEach(batch => {
     const option = document.createElement('option');
-    option.value = batch.name; // Dùng tên batch làm value
+    option.value = batch.id; // Dùng id làm value
     const ordersCount = (batch.orders && batch.orders.length) || 0;
     option.textContent = `${batch.name} (${ordersCount} đơn)`;
     if (batch.isActive) {
@@ -1984,10 +2065,10 @@ function updateCurrentBatchSelect() {
   const select = document.getElementById('currentBatchSelect');
   if (select) {
     select.innerHTML = '<option value="">Chọn danh sách</option>';
-    
+
     orderBatches.forEach(batch => {
       const option = document.createElement('option');
-      option.value = batch.name; // Dùng tên batch thay vì ID
+      option.value = batch.id; // Dùng id batch
       option.textContent = batch.name;
       if (batch.isActive) {
         option.selected = true;
@@ -3078,8 +3159,27 @@ function updateHistoryTable() {
   console.log('Processing', countingHistory.length, 'history entries');
   
   // Sắp xếp theo thời gian mới nhất
+  // Normalize timestamps so older formats like "15:11 - 28/08/2025" are parsed
+  function normalizeTimestamp(t) {
+    if (!t) return new Date(0);
+    const d = new Date(t);
+    if (!isNaN(d.getTime())) return d;
+    // Try pattern "HH:MM - DD/MM/YYYY"
+    const m = typeof t === 'string' && t.match(/(\d{1,2}:\d{2})\s*-\s*(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+    if (m) {
+      const hhmm = m[1].split(':');
+      const day = m[2].padStart(2, '0');
+      const month = m[3].padStart(2, '0');
+      const year = m[4];
+      const iso = `${year}-${month}-${day}T${hhmm[0].padStart(2,'0')}:${hhmm[1]}:00`;
+      const d2 = new Date(iso);
+      if (!isNaN(d2.getTime())) return d2;
+    }
+    return new Date(0);
+  }
+
   const sortedHistory = [...countingHistory].sort((a, b) => 
-    new Date(b.timestamp) - new Date(a.timestamp)
+    normalizeTimestamp(b.timestamp) - normalizeTimestamp(a.timestamp)
   );
   
   sortedHistory.forEach((entry, index) => {
@@ -3097,7 +3197,7 @@ function updateHistoryTable() {
     if (accuracy < 90) accuracyClass = 'accuracy-error';
     
     row.innerHTML = `
-      <td style="font-weight: 500;">${new Date(entry.timestamp).toLocaleString('vi-VN')}</td>
+      <td style="font-weight: 500;">${normalizeTimestamp(entry.timestamp).toLocaleString('vi-VN')}</td>
       <td>
         ${isBatch ? '<span class="batch-indicator">📦 BATCH</span>' : ''}
         <strong>${entry.customerName}</strong>
@@ -3153,7 +3253,7 @@ function showBatchHistoryDetails(batchEntry) {
             <th style="border: 1px solid #dee2e6; padding: 10px; text-align: left;">Khách hàng</th>
             <th style="border: 1px solid #dee2e6; padding: 10px; text-align: left;">Mã đơn</th>
             <th style="border: 1px solid #dee2e6; padding: 10px; text-align: left;">Sản phẩm</th>
-            <th style="border: 1px solid #dee2e6; padding: 10px; text-align: left;">Xe</th>
+            <th style="border: 1px solid #dee2e6; padding: 10px; text-align: left;">Địa chỉ</th>
             <th style="border: 1px solid #dee2e6; padding: 10px; text-align: center;">KH</th>
             <th style="border: 1px solid #dee2e6; padding: 10px; text-align: center;">TH</th>
             <th style="border: 1px solid #dee2e6; padding: 10px; text-align: center;">%</th>
@@ -4690,8 +4790,26 @@ function exportHistory() {
   
   // Sử dụng BOM để fix encoding UTF-8
   let csvContent = "data:text/csv;charset=utf-8,\uFEFF";
-  csvContent += "Mã đơn hàng,Khách hàng,Sản phẩm,Xe,Số lượng thực tế,Số lượng kế hoạch,Thời gian\n";
+  csvContent += "Mã đơn hàng,Khách hàng,Sản phẩm,Địa chỉ,Số lượng thực tế,Số lượng kế hoạch,Thời gian\n";
   
+  // Local timestamp normalizer to handle formats like "HH:MM - DD/MM/YYYY"
+  const normalizeTimestampForCSV = (t) => {
+    if (!t) return new Date(0);
+    const d = new Date(t);
+    if (!isNaN(d.getTime())) return d;
+    const m = typeof t === 'string' && t.match(/(\d{1,2}:\d{2})\s*-\s*(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+    if (m) {
+      const hhmm = m[1].split(':');
+      const day = m[2].padStart(2, '0');
+      const month = m[3].padStart(2, '0');
+      const year = m[4];
+      const iso = `${year}-${month}-${day}T${hhmm[0].padStart(2,'0')}:${hhmm[1]}:00`;
+      const d2 = new Date(iso);
+      if (!isNaN(d2.getTime())) return d2;
+    }
+    return new Date(0);
+  };
+
   countingHistory.forEach(item => {
     // Sử dụng đúng property names và xử lý undefined
     const orderCode = item.orderCode || 'N/A';
@@ -4700,7 +4818,7 @@ function exportHistory() {
     const vehicleNumber = item.vehicleNumber || 'N/A';
     const actualCount = item.actualCount || 0;
     const plannedQuantity = item.plannedQuantity || 0;
-    const timestamp = new Date(item.timestamp).toLocaleString('vi-VN');
+    const timestamp = normalizeTimestampForCSV(item.timestamp).toLocaleString('vi-VN');
     
     csvContent += `"${orderCode}","${customerName}","${productName}","${vehicleNumber}",${actualCount},${plannedQuantity},"${timestamp}"\n`;
   });
@@ -6123,6 +6241,10 @@ function showTabInternal(tabName) {
     case 'overview':
       updateOverview();
       break;
+    case 'history':
+      // Refresh history UI whenever user opens the History tab
+      updateHistoryTable();
+      break;
     case 'product':
       updateProductTable();
       break;
@@ -6561,7 +6683,7 @@ function forceRefreshBatchSelector() {
   orderBatches.forEach((batch, index) => {
     console.log(`Adding batch ${index}:`, batch.name);
     const option = document.createElement('option');
-    option.value = batch.name;
+  option.value = batch.id;
     const ordersCount = (batch.orders && batch.orders.length) || 0;
     option.textContent = `${batch.name} (${ordersCount} đơn)`;
     if (batch.isActive) {
