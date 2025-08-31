@@ -1,4 +1,5 @@
 
+
 //>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>> Bag Counter Display
 #include "soc/soc.h"
 #include "soc/rtc_cntl_reg.h"
@@ -150,10 +151,12 @@ PubSubClient mqtt(ethClient);
 */
 
 //----------------------------------------Sensor pin
-#define SENSOR_PIN 4 // Chân kết nối cảm biến t61
-#define TRIGGER_SENSOR_PIN 39  // Chân cảm biến encoder
+#define SENSOR_PIN 40 // Chân kết nối cảm biến t61
+#define TRIGGER_SENSOR_PIN 4  // Chân cảm biến encoder
 #define START_LED_PIN 38  // relay chạy bắt đầu đếm
 #define DONE_LED_PIN 5   // còi báo đến ngưỡng hoàn thành
+//----------------------------------Button
+#define BUTTON_PIN3 2  // Button 3 - ngắt relay
 
 //----------------------------------------IR Remote pin
 #define RECV_PIN 1  // Chân nhận tín hiệu IR
@@ -184,6 +187,8 @@ bool isRelayDelayActive = false;        // Đang trong thời gian delay relay
 unsigned long warningLedStartTime = 0;   // Thời gian bắt đầu bật LED cảnh báo
 bool isWarningLedActive = false;         // Đang trong trạng thái cảnh báo
 bool hasReachedWarningThreshold = false; // Đã đạt ngưỡng cảnh báo
+//BUTTON
+bool isManualRelayOn = false;
 
 //----------------------------------------
 #define PANEL_RES_X 64
@@ -301,6 +306,7 @@ unsigned long mapIRButton(unsigned long code) {
   if (code == 0xFFA25D || code == 0xE318261B) return 1;  // Nút 1 - Start
   if (code == 0x511DBB || code == 0xFF629D) return 2;    // Nút 2 - Pause
   if (code == 0xFFE21D || code == 0xEE886D7F) return 3;  // Nút 3 - Reset
+  if (code == 0xFF22DD || code == 0x52A3D41F) return 4;
   return 0;
 }
 
@@ -361,7 +367,7 @@ void handleIRCommand(int button) {
       break;
       
     case 2: // Pause
-      Serial.println("🎛️ IR Remote: PAUSE");
+      Serial.println(" IR Remote: PAUSE");
       isRunning = false;
       isTriggerEnabled = false;
       isCountingEnabled = false;
@@ -386,7 +392,7 @@ void handleIRCommand(int button) {
       break;
       
     case 3: // Reset
-      Serial.println("🎛️ IR Remote: RESET");
+      Serial.println(" IR Remote: RESET");
       totalCount = 0;
       isLimitReached = false;
       isRunning = false;
@@ -423,7 +429,17 @@ void handleIRCommand(int button) {
       updateDoneLED();
       needUpdate = true;
       break;
+      case 4: // Custom - Đóng relay 5s
+        Serial.println(" IR Remote: CUSTOM - Đóng relay 5s");
+        digitalWrite(START_LED_PIN, HIGH); // Đóng relay
+        unsigned long relayCustomStart = millis();
+        while (millis() - relayCustomStart < 5000) {
+          delay(10); // Giữ relay trong 5s
+        }
+        digitalWrite(START_LED_PIN, LOW); // Ngắt relay
+        break;
   }
+  
   
   // MQTT connection check
   if (!mqtt.connected()) {
@@ -4789,15 +4805,26 @@ void updateDisplay() {
   //  DÒNG 1: Mã sản phẩm bên trái (Size 2)
   dma_display->setTextSize(1.2);
   dma_display->setTextColor(myYELLOW);
-  dma_display->setCursor(1, 2);
-  
-  // Hiển thị mã sản phẩm nếu có, nếu không thì hiển thị tên sản phẩm rút gọn
-  String displayText = (productCode != "") ? productCode : displayType;
-  dma_display->print(displayText);
+    // Hiển thị mã sản phẩm, nếu dài thì tự động xuống dòng
+    String displayText = (productCode != "") ? productCode : displayType;
+    int maxCodeLen = 10;
+    if (displayText.length() > maxCodeLen) {
+      String line1 = displayText.substring(0, maxCodeLen);
+      String line2 = displayText.substring(maxCodeLen);
+      // Dòng trên
+      dma_display->setCursor(1, 2);
+      dma_display->print(line1);
+      // Dòng dưới (vẫn thuộc dòng 1, y=10 tuỳ loại LED)
+      dma_display->setCursor(1, 10);
+      dma_display->print(line2);
+    } else {
+      dma_display->setCursor(1, 2);
+      dma_display->print(displayText);
+    }
 
   // SỐ ĐẾM LỚN BÊN PHẢI DÒNG 1 (Size 3, màu đỏ)
   String countStr = String((int)totalCount);
-  dma_display->setTextSize(4);
+  dma_display->setTextSize(3.9);
   dma_display->setTextColor(myRED);  // Màu đỏ theo yêu cầu
   
   // Tính toán vị trí căn phải
@@ -4807,8 +4834,8 @@ void updateDisplay() {
   
   // Đặt ở bên phải màn hình
   int totalWidth = PANEL_RES_X * PANEL_CHAIN;
-  int x = totalWidth - w - 2;  // 2 pixel margin từ bên phải
-  int y = 1;  // Căn với dòng 1
+  int x = totalWidth - w;  // 2 pixel margin từ bên phải
+  int y = 5;  // Căn với dòng 1
   
   dma_display->setCursor(x, y);
   dma_display->print(countStr);
@@ -4862,7 +4889,7 @@ void showConnectingDisplay() {
     dma_display->clearScreen();
     
     // Hiển thị "CONNECTING" đơn giản hơn
-    dma_display->setTextSize(1);
+    dma_display->setTextSize(1.2);
     dma_display->setTextColor(myYELLOW);
     dma_display->setCursor(8, 10);
     dma_display->print("BO DEM THONG MINH");
@@ -5390,7 +5417,9 @@ void updateStartLED() {
     startLedOn = false; // Tắt (HIGH) - relay ngưng
   }
   
-  digitalWrite(START_LED_PIN, startLedOn ? HIGH : LOW);
+  if (!isManualRelayOn) {
+    digitalWrite(START_LED_PIN, startLedOn ? HIGH : LOW);
+  }
   
   // Debug relay state
   static bool lastRelayState = false;
@@ -5466,6 +5495,7 @@ void setup() {
   pinMode(TRIGGER_SENSOR_PIN, INPUT);
   pinMode(START_LED_PIN, OUTPUT);
   pinMode(DONE_LED_PIN, OUTPUT);
+  pinMode(BUTTON_PIN3, INPUT_PULLUP);
   
   // Khởi tạo IR Remote
   irrecv.enableIRIn();
@@ -5651,6 +5681,13 @@ void setup() {
 }
 
 void loop() {
+  // Ưu tiên nút bấm BUTTON_PIN3: relay luôn đóng khi nhấn
+  if (digitalRead(BUTTON_PIN3) == LOW) {
+    isManualRelayOn = true;
+    digitalWrite(START_LED_PIN, LOW);
+  } else {
+    isManualRelayOn = false;
+  }
   // Ensure warning LED timeout is evaluated continuously so the LED will
   // turn off after the configured 5 second window even when no new
   // bag count events occur.
