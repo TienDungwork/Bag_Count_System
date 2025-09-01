@@ -107,8 +107,8 @@ const unsigned long COUNT_PUBLISH_THROTTLE = 100;   // 30 giây
 const unsigned long COUNT_PUBLISH_INTERVAL = 100;  // 100ms cho count updates - faster real-time
 
 //----------------------------------------IP tĩnh config (Ethernet)
-IPAddress local_IP(192, 168, 41, 200);     // IP tĩnh Ethernet
-IPAddress gateway(192, 168, 41, 1);      // Gateway router của bạn
+IPAddress local_IP(192, 168, 1, 200);     // IP tĩnh Ethernet
+IPAddress gateway(192, 168, 1, 1);      // Gateway router của bạn
 IPAddress subnet(255, 255, 255, 0);       // Subnet mask
 IPAddress primaryDNS(8, 8, 8, 8);         // DNS
 IPAddress secondaryDNS(8, 8, 4, 4);     // DNS phụ (Google DNS)
@@ -895,8 +895,8 @@ void createDefaultSettingsFile() {
   JsonDocument doc;
   
   // Network settings - default values
-  doc["ipAddress"] = "192.168.41.200";
-  doc["gateway"] = "192.168.41.1";
+  doc["ipAddress"] = "192.168.1.200";
+  doc["gateway"] = "192.168.1.1";
   doc["subnet"] = "255.255.255.0";
   doc["dns1"] = "8.8.8.8";
   doc["dns2"] = "8.8.4.4";
@@ -912,7 +912,7 @@ void createDefaultSettingsFile() {
   doc["relayDelayAfterComplete"] = 5000;
   
   // MQTT settings - default values
-  doc["mqttServer"] = "192.168.41.101";
+  doc["mqttServer"] = "192.168.1.160";
   doc["mqttServerBackup"] = "test.mosquitto.org";
   doc["mqttPort"] = 1883;
   doc["mqttWebSocketPort"] = 8080;
@@ -1265,8 +1265,8 @@ void printDataStatus() {
 //----------------------------------------Network Setup Functions
 void loadWiFiConfig() {
   // Set default values first
-  wifi_static_ip = IPAddress(192, 168, 41, 201);  // Default static IP
-  wifi_gateway = IPAddress(192, 168, 41, 1);      // Default gateway
+  wifi_static_ip = IPAddress(192, 168, 1, 201);  // Default static IP
+  wifi_gateway = IPAddress(192, 168, 1, 1);      // Default gateway
   wifi_subnet = IPAddress(255, 255, 255, 0);     // Default subnet
   wifi_dns1 = IPAddress(8, 8, 8, 8);             // Google DNS
   wifi_dns2 = IPAddress(8, 8, 4, 4);             // Google DNS backup
@@ -4556,8 +4556,8 @@ server.on("/webfonts/fa-solid-900.ttf", HTTP_GET, [](){
     autoReset = true;  // Bật tự động chuyển đơn hàng
     
     // Reset network về default
-    local_IP = IPAddress(192, 168, 41, 200);
-    gateway = IPAddress(192, 168, 41, 1);
+    local_IP = IPAddress(192, 168, 1, 200);
+    gateway = IPAddress(192, 168, 1, 1);
     subnet = IPAddress(255, 255, 255, 0);
     primaryDNS = IPAddress(8, 8, 8, 8);
     secondaryDNS = IPAddress(8, 8, 4, 4);
