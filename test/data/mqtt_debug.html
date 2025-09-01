@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>MQTT Debug Test</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; }
+        .form-group { margin: 10px 0; }
+        label { display: inline-block; width: 200px; }
+        input { width: 200px; padding: 5px; }
+        button { padding: 10px 20px; margin: 5px; }
+        .debug { background: #f0f0f0; padding: 10px; margin: 10px 0; }
+        pre { background: #000; color: #0f0; padding: 10px; overflow: auto; }
+    </style>
+</head>
+<body>
+    <h1>MQTT Settings Debug Test</h1>
+    
+    <div class="debug">
+        <h3>Current ESP32 Settings:</h3>
+        <button onclick="loadCurrentSettings()">Load from ESP32</button>
+        <pre id="currentSettings">Click "Load from ESP32" to see current settings</pre>
+    </div>
+    
+    <form id="mqttForm">
+        <h3>Test MQTT Configuration:</h3>
+        
+        <div class="form-group">
+            <label>MQTT Server:</label>
+            <input type="text" id="mqttServer" value="192.168.41.50">
+        </div>
+        
+        <div class="form-group">
+            <label>MQTT Port:</label>
+            <input type="number" id="mqttPort" value="1883">
+        </div>
+        
+        <div class="form-group">
+            <label>MQTT Backup Server:</label>
+            <input type="text" id="mqttServerBackup" value="test.mosquitto.org">
+        </div>
+        
+        <div class="form-group">
+            <label>WebSocket Port:</label>
+            <input type="number" id="mqttWebSocketPort" value="8080">
+        </div>
+        
+        <button type="button" onclick="testSaveSettings()">Test Save MQTT Settings</button>
+        <button type="button" onclick="loadCurrentSettings()">Reload ESP32 Settings</button>
+    </form>
+    
+    <div class="debug">
+        <h3>Debug Log:</h3>
+        <pre id="debugLog"></pre>
+    </div>
+
+    <script>
+        function log(message) {
+            const debugLog = document.getElementById('debugLog');
+            const timestamp = new Date().toLocaleTimeString();
+            debugLog.textContent += `[${timestamp}] ${message}\n`;
+            debugLog.scrollTop = debugLog.scrollHeight;
+        }
+
+        async function loadCurrentSettings() {
+            try {
+                log('Loading current settings from ESP32...');
+                const response = await fetch('/api/settings');
+                if (response.ok) {
+                    const settings = await response.json();
+                    document.getElementById('currentSettings').textContent = JSON.stringify(settings, null, 2);
+                    
+                    // Auto-fill form with current values
+                    document.getElementById('mqttServer').value = settings.mqttServer || '';
+                    document.getElementById('mqttPort').value = settings.mqttPort || 1883;
+                    document.getElementById('mqttServerBackup').value = settings.mqttServerBackup || '';
+                    document.getElementById('mqttWebSocketPort').value = settings.mqttWebSocketPort || 8080;
+                    
+                    log(`Current MQTT Server: ${settings.mqttServer}`);
+                    log(`Current MQTT Backup: ${settings.mqttServerBackup}`);
+                    log(`Using Backup Mode: ${settings._mqttUsingBackup}`);
+                } else {
+                    log(`Error loading settings: ${response.status}`);
+                }
+            } catch (error) {
+                log(`Error: ${error.message}`);
+            }
+        }
+
+        async function testSaveSettings() {
+            try {
+                const data = {
+                    conveyorName: 'BT-001',
+                    location: 'Test Location',
+                    brightness: 35,
+                    sensorDelay: 50,
+                    bagDetectionDelay: 200,
+                    minBagInterval: 100,
+                    autoReset: true,
+                    relayDelayAfterComplete: 5000,
+                    ipAddress: '192.168.41.200',
+                    gateway: '192.168.41.1',
+                    subnet: '255.255.255.0',
+                    dns1: '8.8.8.8',
+                    dns2: '8.8.4.4',
+                    // MQTT settings
+                    mqttServer: document.getElementById('mqttServer').value,
+                    mqttServerBackup: document.getElementById('mqttServerBackup').value,
+                    mqttPort: parseInt(document.getElementById('mqttPort').value),
+                    mqttWebSocketPort: parseInt(document.getElementById('mqttWebSocketPort').value)
+                };
+
+                log('Sending MQTT settings to ESP32...');
+                log(`MQTT Server: ${data.mqttServer}`);
+                log(`MQTT Port: ${data.mqttPort}`);
+                log(`MQTT Backup: ${data.mqttServerBackup}`);
+                
+                const response = await fetch('/api/settings', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify(data)
+                });
+
+                if (response.ok) {
+                    const result = await response.json();
+                    log(`Success: ${result.message}`);
+                    
+                    // Wait a bit then reload to see changes
+                    setTimeout(() => {
+                        log('Reloading settings to verify...');
+                        loadCurrentSettings();
+                    }, 3000);
+                } else {
+                    log(`Error saving settings: ${response.status}`);
+                }
+            } catch (error) {
+                log(`Error: ${error.message}`);
+            }
+        }
+
+        // Auto-load settings on page load
+        window.onload = loadCurrentSettings;
+    </script>
+</body>
+</html>

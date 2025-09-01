@@ -73,9 +73,10 @@ const char* ap_ssid = "BagCounter_Config";
 const char* ap_password = "12345678";
 
 //----------------------------------------Network & MQTT config
-const char* mqtt_server = "broker.hivemq.com";  // Thay đổi từ test.mosquitto.org
-const char* mqtt_server_backup = "test.mosquitto.org";  // Backup broker
-const int mqtt_port = 1883;
+String mqtt_server = "192.168.1.160";  // Địa chỉ IP của máy tính chạy broker local
+String mqtt_server_backup = "test.mosquitto.org";  // Backup broker cũng là local
+int mqtt_port = 1883;
+int mqtt_websocket_port = 8080;  // Cổng WebSocket cho MQTT
 bool mqtt_use_backup = false;
 
 //----------------------------------------MQTT Topics Structure
@@ -106,8 +107,8 @@ const unsigned long COUNT_PUBLISH_THROTTLE = 100;   // 30 giây
 const unsigned long COUNT_PUBLISH_INTERVAL = 100;  // 100ms cho count updates - faster real-time
 
 //----------------------------------------IP tĩnh config (Ethernet)
-IPAddress local_IP(192, 168, 1, 200);     // IP tĩnh Ethernet
-IPAddress gateway(192, 168, 1, 1);      // Gateway router của bạn
+IPAddress local_IP(192, 168, 41, 200);     // IP tĩnh Ethernet
+IPAddress gateway(192, 168, 41, 1);      // Gateway router của bạn
 IPAddress subnet(255, 255, 255, 0);       // Subnet mask
 IPAddress primaryDNS(8, 8, 8, 8);         // DNS
 IPAddress secondaryDNS(8, 8, 4, 4);     // DNS phụ (Google DNS)
@@ -445,8 +446,8 @@ void handleIRCommand(int button) {
   if (!mqtt.connected()) {
     String clientId = "ESP32_BagCounter_" + String(WiFi.macAddress());
     clientId.replace(":", "");
-    const char* current_broker = mqtt_use_backup ? mqtt_server_backup : mqtt_server;
-    mqtt.setServer(current_broker, mqtt_port);
+    String current_broker = mqtt_use_backup ? mqtt_server_backup : mqtt_server;
+    mqtt.setServer(current_broker.c_str(), mqtt_port);
     
     if (mqtt.connect(clientId.c_str())) {
       mqtt.subscribe(TOPIC_CMD_START);
@@ -779,6 +780,12 @@ void saveSettingsToFile() {
   doc["autoReset"] = autoReset;
   doc["relayDelayAfterComplete"] = relayDelayAfterComplete;
   
+  // MQTT settings
+  doc["mqttServer"] = mqtt_server;
+  doc["mqttServerBackup"] = mqtt_server_backup;
+  doc["mqttPort"] = mqtt_port;
+  doc["mqttWebSocketPort"] = mqtt_websocket_port;
+  
   File file = LittleFS.open("/settings.json", "w");
   if (file) {
     serializeJson(doc, file);
@@ -839,6 +846,20 @@ void loadSettingsFromFile() {
       autoReset = doc["autoReset"].as<bool>();
       relayDelayAfterComplete = doc["relayDelayAfterComplete"].as<int>();
       
+      // Load MQTT settings
+      if (doc.containsKey("mqttServer")) {
+        mqtt_server = doc["mqttServer"].as<String>();
+      }
+      if (doc.containsKey("mqttServerBackup")) {
+        mqtt_server_backup = doc["mqttServerBackup"].as<String>();
+      }
+      if (doc.containsKey("mqttPort")) {
+        mqtt_port = doc["mqttPort"].as<int>();
+      }
+      if (doc.containsKey("mqttWebSocketPort")) {
+        mqtt_websocket_port = doc["mqttWebSocketPort"].as<int>();
+      }
+      
       // Sync debounce delay
       debounceDelay = sensorDelayMs;
       
@@ -851,6 +872,8 @@ void loadSettingsFromFile() {
       Serial.println("    minBagInterval: " + String(minBagInterval) + "ms");
       Serial.println("    autoReset: " + String(autoReset ? "true" : "false"));
       Serial.println("    relayDelayAfterComplete: " + String(relayDelayAfterComplete) + "ms");
+      Serial.println("    mqttServer: " + mqtt_server);
+      Serial.println("    mqttPort: " + String(mqtt_port));
       
       Serial.println("All settings loaded from file successfully");
     } else {
@@ -872,8 +895,8 @@ void createDefaultSettingsFile() {
   JsonDocument doc;
   
   // Network settings - default values
-  doc["ipAddress"] = "192.168.1.200";
-  doc["gateway"] = "192.168.1.1";
+  doc["ipAddress"] = "192.168.41.200";
+  doc["gateway"] = "192.168.41.1";
   doc["subnet"] = "255.255.255.0";
   doc["dns1"] = "8.8.8.8";
   doc["dns2"] = "8.8.4.4";
@@ -887,6 +910,12 @@ void createDefaultSettingsFile() {
   doc["minBagInterval"] = 100;
   doc["autoReset"] = true;  // Enable automatic order switching
   doc["relayDelayAfterComplete"] = 5000;
+  
+  // MQTT settings - default values
+  doc["mqttServer"] = "192.168.41.101";
+  doc["mqttServerBackup"] = "test.mosquitto.org";
+  doc["mqttPort"] = 1883;
+  doc["mqttWebSocketPort"] = 8080;
   
   // Add creation timestamp
   doc["_created"] = "ESP32_Default_Config";
@@ -1236,8 +1265,8 @@ void printDataStatus() {
 //----------------------------------------Network Setup Functions
 void loadWiFiConfig() {
   // Set default values first
-  wifi_static_ip = IPAddress(192, 168, 1, 201);  // Default static IP
-  wifi_gateway = IPAddress(192, 168, 1, 1);      // Default gateway
+  wifi_static_ip = IPAddress(192, 168, 41, 201);  // Default static IP
+  wifi_gateway = IPAddress(192, 168, 41, 1);      // Default gateway
   wifi_subnet = IPAddress(255, 255, 255, 0);     // Default subnet
   wifi_dns1 = IPAddress(8, 8, 8, 8);             // Google DNS
   wifi_dns2 = IPAddress(8, 8, 4, 4);             // Google DNS backup
@@ -1442,9 +1471,9 @@ void setupNetwork() {
 
 void setupMQTT() {
   // Thử broker chính trước
-  const char* current_broker = mqtt_use_backup ? mqtt_server_backup : mqtt_server;
+  String current_broker = mqtt_use_backup ? mqtt_server_backup : mqtt_server;
   
-  mqtt.setServer(current_broker, mqtt_port);
+  mqtt.setServer(current_broker.c_str(), mqtt_port);
   mqtt.setCallback(onMqttMessage);
   mqtt.setBufferSize(512);
   mqtt.setKeepAlive(30); // Tăng keep alive để ổn định hơn
@@ -2038,6 +2067,53 @@ void setupWebServer() {
       server.send(404, "text/plain", "JS not found");
     }
   });
+
+  // Serve MQTT.js library
+  server.on("/mqtt.min.js", HTTP_GET, [](){
+    if (LittleFS.exists("/mqtt.min.js")) {
+      File file = LittleFS.open("/mqtt.min.js", "r");
+      server.streamFile(file, "application/javascript");
+      file.close();
+      Serial.println("Served mqtt.min.js from LittleFS");
+    } else {
+      server.send(404, "text/plain", "mqtt.min.js not found");
+      Serial.println("ERROR: mqtt.min.js not found in LittleFS");
+    }
+  });
+
+  // Serve FontAwesome CSS
+  server.on("/all.min.css", HTTP_GET, [](){
+    if (LittleFS.exists("/all.min.css")) {
+      File file = LittleFS.open("/all.min.css", "r");
+      server.streamFile(file, "text/css");
+      file.close();
+      Serial.println("Served all.min.css from LittleFS");
+    } else {
+      server.send(404, "text/plain", "all.min.css not found");
+      Serial.println("ERROR: all.min.css not found in LittleFS");
+    }
+  });
+  
+  //Webfonts
+  server.on("/webfonts/fa-solid-900.woff2", HTTP_GET, [](){
+  if (LittleFS.exists("/webfonts/fa-solid-900.woff2")) {
+    File file = LittleFS.open("/webfonts/fa-solid-900.woff2", "r");
+    server.streamFile(file, "font/woff2");
+    file.close();
+  } else {
+    server.send(404, "text/plain", "Font not found");
+  }
+});
+
+server.on("/webfonts/fa-solid-900.ttf", HTTP_GET, [](){
+  if (LittleFS.exists("/webfonts/fa-solid-900.ttf")) {
+    File file = LittleFS.open("/webfonts/fa-solid-900.ttf", "r");
+    server.streamFile(file, "font/ttf");
+    file.close();
+  } else {
+    server.send(404, "text/plain", "Font not found");
+  }
+});
 
   // Serve test customer API page
   server.on("/test-customer-api", HTTP_GET, [](){
@@ -3351,6 +3427,13 @@ void setupWebServer() {
     doc["brightness"] = displayBrightness;
     doc["relayDelayAfterComplete"] = relayDelayAfterComplete;
     
+    // MQTT settings
+    doc["mqttServer"] = mqtt_server;
+    doc["mqttServerBackup"] = mqtt_server_backup;
+    doc["mqttPort"] = mqtt_port;
+    doc["mqttWebSocketPort"] = mqtt_websocket_port;
+    doc["_mqttUsingBackup"] = mqtt_use_backup;  // Debug info
+    
     // Add debug info about settings source
     doc["_debug"] = LittleFS.exists("/settings.json") ? "file" : "defaults";
     doc["_settingsFileExists"] = LittleFS.exists("/settings.json");
@@ -3370,7 +3453,7 @@ void setupWebServer() {
       Serial.println("Receiving settings from web, applying and saving...");
       
       // ÁP DỤNG SETTINGS NGAY LẬP TỨC VÀO BIẾN GLOBAL
-      if (doc.containsKey("onveyorName")) {
+      if (doc.containsKey("conveyorName")) {
         String oldValue = conveyorName;
         conveyorName = doc["conveyorName"].as<String>();
         Serial.println("  conveyorName: '" + oldValue + "' → '" + conveyorName + "'");
@@ -3422,6 +3505,39 @@ void setupWebServer() {
         Serial.println("  relayDelayAfterComplete: " + String(oldValue) + "ms → " + String(::relayDelayAfterComplete) + "ms");
       }
       
+      // MQTT configuration
+      bool mqttNeedReconnect = false;
+      if (doc.containsKey("mqttServer")) {
+        String oldValue = mqtt_server;
+        mqtt_server = doc["mqttServer"].as<String>();
+        if (oldValue != mqtt_server) {
+          mqttNeedReconnect = true;
+          mqtt_use_backup = false; // Reset về broker chính khi thay đổi
+          Serial.println("  mqttServer: '" + oldValue + "' → '" + mqtt_server + "' (reset to primary)");
+        }
+      }
+      
+      if (doc.containsKey("mqttServerBackup")) {
+        String oldValue = mqtt_server_backup;
+        mqtt_server_backup = doc["mqttServerBackup"].as<String>();
+        Serial.println("  mqttServerBackup: '" + oldValue + "' → '" + mqtt_server_backup + "'");
+      }
+      
+      if (doc.containsKey("mqttPort")) {
+        int oldValue = mqtt_port;
+        mqtt_port = doc["mqttPort"].as<int>();
+        if (oldValue != mqtt_port) {
+          mqttNeedReconnect = true;
+          Serial.println("  mqttPort: " + String(oldValue) + " → " + String(mqtt_port));
+        }
+      }
+      
+      if (doc.containsKey("mqttWebSocketPort")) {
+        int oldValue = mqtt_websocket_port;
+        mqtt_websocket_port = doc["mqttWebSocketPort"].as<int>();
+        Serial.println("  mqttWebSocketPort: " + String(oldValue) + " → " + String(mqtt_websocket_port));
+      }
+      
       // Cấu hình IP tĩnh Ethernet
       String ethIP = doc["ipAddress"];
       String ethGateway = doc["gateway"];
@@ -3470,8 +3586,24 @@ void setupWebServer() {
       Serial.println("  - Min Bag Interval: " + String(::minBagInterval) + "ms");
       Serial.println("  - Auto Reset: " + String(::autoReset ? "true" : "false"));
       Serial.println("  - Relay Delay After Complete: " + String(::relayDelayAfterComplete) + "ms");
+      Serial.println("  - MQTT Server: " + mqtt_server);
+      Serial.println("  - MQTT Port: " + String(mqtt_port));
       if (ethIP.length() > 0) {
         Serial.println("  - Ethernet IP: " + ethIP);
+      }
+      
+      // Reconnect MQTT if needed
+      if (mqttNeedReconnect) {
+        Serial.println("MQTT configuration changed, reconnecting...");
+        Serial.println("  New primary broker: " + mqtt_server + ":" + String(mqtt_port));
+        Serial.println("  New backup broker: " + mqtt_server_backup + ":" + String(mqtt_port));
+        Serial.println("  Using backup mode: " + String(mqtt_use_backup ? "true" : "false"));
+        
+        mqtt.disconnect();
+        String current_broker = mqtt_use_backup ? mqtt_server_backup : mqtt_server;
+        mqtt.setServer(current_broker.c_str(), mqtt_port);
+        Serial.println("  Connecting to: " + current_broker);
+        // Will reconnect in main loop
       }
       
       // Trả về response với thông báo restart nếu cần
@@ -4424,8 +4556,8 @@ void setupWebServer() {
     autoReset = true;  // Bật tự động chuyển đơn hàng
     
     // Reset network về default
-    local_IP = IPAddress(192, 168, 1, 200);
-    gateway = IPAddress(192, 168, 1, 1);
+    local_IP = IPAddress(192, 168, 41, 200);
+    gateway = IPAddress(192, 168, 41, 1);
     subnet = IPAddress(255, 255, 255, 0);
     primaryDNS = IPAddress(8, 8, 8, 8);
     secondaryDNS = IPAddress(8, 8, 4, 4);
@@ -5915,14 +6047,14 @@ void loop() {
       }
       
       bool connected = false;
-      const char* current_broker = mqtt_use_backup ? mqtt_server_backup : mqtt_server;
-      mqtt.setServer(current_broker, mqtt_port);
+      String current_broker = mqtt_use_backup ? mqtt_server_backup : mqtt_server;
+      mqtt.setServer(current_broker.c_str(), mqtt_port);
       
       String clientId = "ESP32_BagCounter_" + String(WiFi.macAddress());
       clientId.replace(":", "");
       
       if (mqtt.connect(clientId.c_str())) {
-        Serial.println("MQTT reconnected successfully to: " + String(current_broker));
+        Serial.println("MQTT reconnected successfully to: " + current_broker);
         reconnectAttempts = 0; // Reset counter
         mqttErrorLogged = false;
         

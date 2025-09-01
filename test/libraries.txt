@@ -1,8 +1,9 @@
 # Arduino Libraries Dependencies
 # Use ESP32 specific libraries
 WiFi@ESP32
-WebServer_ESP32_SC_W5500
-ArduinoJson
-PubSubClient
-IRremote
-ESP32-HUB75-MatrixPanel-I2S-DMA
+khoih-prog/WebServer_ESP32_SC_W5500@^1.2.1
+bblanchon/ArduinoJson@^7.4.2
+knolleary/PubSubClient@^2.8
+z3t0/IRremote@3.5.0
+mrfaptastic/ESP32 HUB75 LED MATRIX PANEL DMA Display@^3.0.13
+adafruit/Adafruit GFX Library@^1.12.1

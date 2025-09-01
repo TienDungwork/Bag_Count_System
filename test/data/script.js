@@ -43,7 +43,11 @@ let settings = {
   minBagInterval: 100,
   autoReset: false,
   brightness: 35,
-  relayDelayAfterComplete: 5000
+  relayDelayAfterComplete: 5000,
+  mqttServer: '192.168.41.101',
+  mqttServerBackup: 'test.mosquitto.org',
+  mqttPort: 1883,
+  mqttWebSocketPort: 8080
 };
 
 // Initialize application
@@ -85,8 +89,10 @@ document.addEventListener('DOMContentLoaded', async function() {
   updateConveyorNameDisplay();
   showTab('overview');
   
-  // Initialize MQTT Client
-  initMQTTClient();
+  // Initialize MQTT Client AFTER settings are loaded
+  setTimeout(() => {
+    initMQTTClient();
+  }, 1000);
   
   // Start background sync
   setTimeout(() => {
@@ -701,9 +707,8 @@ function initMQTTClient() {
       
       // Try multiple stable MQTT brokers with fallback - PRIORITIZE SAME AS ESP32
       const brokers = [
-        'ws://broker.hivemq.com:8000/mqtt', // HiveMQ WebSocket - SAME AS ESP32
-        'wss://broker.emqx.io:8084/mqtt',  // EMQX backup
-        'wss://mqtt.eclipseprojects.io:443/mqtt' // Eclipse backup
+        `ws://${settings.mqttServer}:${settings.mqttWebSocketPort}/mqtt`, // Primary broker từ settings
+        `ws://${settings.mqttServerBackup}:${settings.mqttWebSocketPort}/mqtt` // Backup broker từ settings
       ];
       
       let brokerIndex = 0;
@@ -3610,6 +3615,12 @@ async function loadSettingsFromESP32() {
       if (esp32Settings.minBagInterval !== undefined) settings.minBagInterval = esp32Settings.minBagInterval;
       if (esp32Settings.autoReset !== undefined) settings.autoReset = esp32Settings.autoReset;
       if (esp32Settings.relayDelayAfterComplete !== undefined) settings.relayDelayAfterComplete = esp32Settings.relayDelayAfterComplete;
+      
+      // MQTT settings
+      if (esp32Settings.mqttServer !== undefined) settings.mqttServer = esp32Settings.mqttServer;
+      if (esp32Settings.mqttServerBackup !== undefined) settings.mqttServerBackup = esp32Settings.mqttServerBackup;
+      if (esp32Settings.mqttPort !== undefined) settings.mqttPort = esp32Settings.mqttPort;
+      if (esp32Settings.mqttWebSocketPort !== undefined) settings.mqttWebSocketPort = esp32Settings.mqttWebSocketPort;
       // LƯU NGAY VÀO localStorage (đè settings cũ)
       localStorage.setItem('settings', JSON.stringify(settings));
       updateSettingsForm();
@@ -3642,6 +3653,12 @@ function updateSettingsForm() {
   document.getElementById('brightness').value = settings.brightness;
   document.getElementById('brightnessValue').textContent = settings.brightness + '%';
   document.getElementById('relayDelay').value = settings.relayDelayAfterComplete / 1000; // Convert ms to seconds
+  
+  // MQTT settings
+  document.getElementById('mqttServer').value = settings.mqttServer || '';
+  document.getElementById('mqttServerBackup').value = settings.mqttServerBackup || '';
+  document.getElementById('mqttPort').value = settings.mqttPort || 1883;
+  document.getElementById('mqttWebSocketPort').value = settings.mqttWebSocketPort || 8080;
   // CẬP NHẬT TÊN BĂNG TẢI TRÊN HEADER
   updateConveyorNameDisplay();
 }
@@ -4863,6 +4880,12 @@ function saveSettings() {
   settings.brightness = parseInt(document.getElementById('brightness').value);
   settings.relayDelayAfterComplete = parseInt(document.getElementById('relayDelay').value) * 1000; // Convert seconds to ms
   
+  // MQTT settings
+  settings.mqttServer = document.getElementById('mqttServer').value;
+  settings.mqttServerBackup = document.getElementById('mqttServerBackup').value;
+  settings.mqttPort = parseInt(document.getElementById('mqttPort').value);
+  settings.mqttWebSocketPort = parseInt(document.getElementById('mqttWebSocketPort').value);
+  
   console.log('DEBUG: relayDelay form value:', document.getElementById('relayDelay').value);
   console.log('DEBUG: settings.relayDelayAfterComplete after update:', settings.relayDelayAfterComplete);
   
@@ -5020,6 +5043,11 @@ function sendSettingsToESP32() {
     minBagInterval: settings.minBagInterval,         // GHI ĐÈ default 100ms
     autoReset: settings.autoReset,                   // GHI ĐÈ default false
     relayDelayAfterComplete: settings.relayDelayAfterComplete, // Thêm relay delay
+    // MQTT settings
+    mqttServer: settings.mqttServer,
+    mqttServerBackup: settings.mqttServerBackup,
+    mqttPort: settings.mqttPort,
+    mqttWebSocketPort: settings.mqttWebSocketPort,
     // Network settings
     ipAddress: settings.ipAddress,
     gateway: settings.gateway,
@@ -5029,6 +5057,11 @@ function sendSettingsToESP32() {
   };
   
   console.log('Sending settings to ESP32 (will override defaults):', data);
+  console.log('DEBUG MQTT Settings being sent:');
+  console.log('  mqttServer:', settings.mqttServer);
+  console.log('  mqttServerBackup:', settings.mqttServerBackup);
+  console.log('  mqttPort:', settings.mqttPort);
+  console.log('  mqttWebSocketPort:', settings.mqttWebSocketPort);
   
   fetch('/api/settings', {
     method: 'POST',
@@ -5059,6 +5092,18 @@ function sendSettingsToESP32() {
       // KHÔNG reload settings từ ESP32 để tránh ghi đè giá trị vừa save
       // Chỉ cập nhật display name
       updateConveyorNameDisplay();
+      
+      // Reconnect MQTT with new settings if they changed
+      if (settings.mqttServer || settings.mqttWebSocketPort) {
+        console.log('MQTT settings may have changed, reconnecting...');
+        setTimeout(() => {
+          if (mqttClient) {
+            mqttClient.end();
+            mqttClient = null;
+          }
+          initMQTTClient(); // Reinitialize with new settings
+        }, 2000);
+      }
       
       // Optional: chỉ verify sau 3 giây và không ghi đè
       setTimeout(async () => {
