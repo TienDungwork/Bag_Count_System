@@ -7,7 +7,7 @@
 
 ## 2. Chỉnh sửa file cấu hình `mosquitto.conf`
 - Đường dẫn ví dụ: `C:\Programs\mosquitto\mosquitto.conf`
-- Thêm nội dung sau vào file:
+- Thêm nội dung sau vào cuối file:
 
 ```
 listener 1883
