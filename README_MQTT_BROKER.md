@@ -2,6 +2,7 @@
 
 ## 1. Cài đặt Mosquitto
 - Tải Mosquitto từ trang chính thức: https://mosquitto.org/download/
+- Tải mosquitto-2.0.22-install-windows-x64.exe
 - Cài đặt vào máy (ví dụ: `C:\Programs\mosquitto`).
 
 ## 2. Chỉnh sửa file cấu hình `mosquitto.conf`
