@@ -13,6 +13,49 @@ body {
   line-height: 1.6;
 }
 
+/* Device Status Indicator */
+.device-status-indicator {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 15px;
+  padding: 8px 16px;
+  border-radius: 8px;
+  font-weight: 600;
+  font-size: 14px;
+  transition: all 0.3s ease;
+}
+
+.device-status-indicator.online {
+  background-color: rgba(40, 167, 69, 0.1);
+  border: 1px solid #28a745;
+  color: #28a745;
+}
+
+.device-status-indicator.offline {
+  background-color: rgba(108, 117, 125, 0.1);
+  border: 1px solid #6c757d;
+  color: #6c757d;
+}
+
+.device-status-indicator::before {
+  content: '';
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  transition: all 0.3s ease;
+}
+
+.device-status-indicator.online::before {
+  background-color: #28a745;
+  box-shadow: 0 0 8px rgba(40, 167, 69, 0.3);
+}
+
+.device-status-indicator.offline::before {
+  background-color: #6c757d;
+  box-shadow: 0 0 8px rgba(108, 117, 125, 0.3);
+}
+
 /* Header */
 .app-header {
   background: linear-gradient(135deg, #1e3c72 0%, #2a5298 100%);

@@ -28,6 +28,12 @@ let mqttConnected = false;
 let currentDeviceStatus = {};
 let lastMqttUpdate = 0;
 
+// Device connection monitoring
+let lastHeartbeat = 0;
+let deviceConnected = false;
+let heartbeatCheckInterval = null;
+const HEARTBEAT_TIMEOUT = 45000; // 45 giây không có heartbeat thì coi như mất kết nối (ESP32 gửi mỗi 30s)
+
 // API polling configuration (MANAGEMENT DATA ONLY - NO real-time counting or IR commands)
 let apiPollingInterval = null;
 const API_POLL_FREQUENCY = 5000; // 5 seconds - ONLY for products/settings sync, NO count/status data
@@ -737,6 +743,9 @@ function initMQTTClient() {
           
           // Subscribe to all relevant topics
           subscribeMQTTTopics();
+          
+          // Start device monitoring
+          startDeviceMonitoring();
         });
         
         mqttClient.on('message', function(topic, message) {
@@ -850,6 +859,8 @@ async function handleMQTTMessage(topic, data) {
       
     case 'bagcounter/heartbeat':
       updateHeartbeat(data);
+      // Cập nhật device connection status
+      updateDeviceConnectionStatus(true);
       break;
       
     default:
@@ -1128,12 +1139,94 @@ function updateSensorStatus(data) {
 }
 
 function updateHeartbeat(data) {
+  console.log('Heartbeat received:', data);
+  
   // Update device online status
+  lastHeartbeat = Date.now();
+  
+  // Nếu thiết bị vừa kết nối lại sau khi mất kết nối
+  if (!deviceConnected) {
+    deviceConnected = true;
+    console.log('Device reconnected - heartbeat received');
+    showNotification('✅ Thiết bị đã kết nối lại', 'success');
+    updateDeviceConnectionStatus(true);
+  }
+  
   const onlineIndicator = document.getElementById('deviceOnline');
   if (onlineIndicator) {
     onlineIndicator.textContent = 'Online';
     onlineIndicator.style.color = 'green';
   }
+}
+
+// Kiểm tra heartbeat timeout để phát hiện mất kết nối thiết bị
+function checkHeartbeatTimeout() {
+  const now = Date.now();
+  const timeSinceLastHeartbeat = now - lastHeartbeat;
+  
+  if (timeSinceLastHeartbeat > HEARTBEAT_TIMEOUT && deviceConnected) {
+    // Thiết bị mất kết nối
+    deviceConnected = false;
+    console.warn('Device disconnected - no heartbeat for', timeSinceLastHeartbeat, 'ms');
+    
+    // Hiện thông báo cảnh báo nhẹ nhàng
+    showNotification('⚠️ Mất kết nối thiết bị', 'warning');
+    
+    // Cập nhật UI
+    updateDeviceConnectionStatus(false);
+    
+    // Nếu đang đếm hàng, tự động chuyển UI sang trạng thái tạm dừng
+    if (countingState.isActive) {
+      console.log('Device disconnected while counting - updating UI to paused state');
+      countingState.isActive = false;
+      updateButtonStates('paused');
+      
+      // Cập nhật trạng thái orders trong batch hiện tại sang 'paused' 
+      const activeBatch = orderBatches.find(b => b.isActive);
+      if (activeBatch) {
+        const countingOrders = activeBatch.orders.filter(o => o.status === 'counting');
+        countingOrders.forEach(order => {
+          order.status = 'paused';
+        });
+        saveOrderBatches();
+        updateOrderTable();
+      }
+      
+      // Cập nhật overview
+      updateOverview();
+      
+      showNotification('Tạm dừng do mất kết nối thiết bị', 'warning');
+    }
+  }
+}
+
+// Cập nhật trạng thái kết nối thiết bị trên UI
+function updateDeviceConnectionStatus(connected) {
+  // Cập nhật device status indicator
+  const deviceStatusIndicator = document.getElementById('deviceStatusIndicator');
+  if (deviceStatusIndicator) {
+    deviceStatusIndicator.className = `device-status-indicator ${connected ? 'online' : 'offline'}`;
+    const statusText = deviceStatusIndicator.querySelector('.status-text');
+    if (statusText) {
+      statusText.textContent = connected ? 'Thiết bị đã kết nối' : 'Thiết bị mất kết nối';
+    }
+  }
+}
+
+// Khởi động device monitoring
+function startDeviceMonitoring() {
+  if (heartbeatCheckInterval) {
+    clearInterval(heartbeatCheckInterval);
+  }
+  
+  // Kiểm tra heartbeat mỗi 10 giây
+  heartbeatCheckInterval = setInterval(checkHeartbeatTimeout, 10000);
+  
+  // Khởi tạo trạng thái ban đầu
+  lastHeartbeat = Date.now();
+  deviceConnected = true;
+  
+  console.log('Device monitoring started - checking every 10 seconds');
 }
 
 // Handle IR Command Messages from MQTT  
