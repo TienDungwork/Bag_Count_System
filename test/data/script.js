@@ -32,7 +32,7 @@ let lastMqttUpdate = 0;
 let lastHeartbeat = 0;
 let deviceConnected = false;
 let heartbeatCheckInterval = null;
-const HEARTBEAT_TIMEOUT = 45000; // 45 giây không có heartbeat thì coi như mất kết nối (ESP32 gửi mỗi 30s)
+const HEARTBEAT_TIMEOUT = 5000; // 45 giây không có heartbeat thì coi như mất kết nối (ESP32 gửi mỗi 30s)
 
 // API polling configuration (MANAGEMENT DATA ONLY - NO real-time counting or IR commands)
 let apiPollingInterval = null;
@@ -1219,8 +1219,8 @@ function startDeviceMonitoring() {
     clearInterval(heartbeatCheckInterval);
   }
   
-  // Kiểm tra heartbeat mỗi 10 giây
-  heartbeatCheckInterval = setInterval(checkHeartbeatTimeout, 10000);
+  // Kiểm tra heartbeat mỗi 5 giây
+  heartbeatCheckInterval = setInterval(checkHeartbeatTimeout, 5000);
   
   // Khởi tạo trạng thái ban đầu
   lastHeartbeat = Date.now();

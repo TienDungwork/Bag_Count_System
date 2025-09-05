@@ -102,7 +102,7 @@ unsigned long lastMqttPublish = 0;
 unsigned long lastHeartbeat = 0;
 unsigned long lastCountPublish = 0;     // Throttle count updates
 const unsigned long MQTT_PUBLISH_INTERVAL = 500;  // 2 giây
-const unsigned long HEARTBEAT_INTERVAL = 30000; 
+const unsigned long HEARTBEAT_INTERVAL = 3000; 
 const unsigned long COUNT_PUBLISH_THROTTLE = 100;   // 30 giây  
 const unsigned long COUNT_PUBLISH_INTERVAL = 100;  // 100ms cho count updates - faster real-time
 
