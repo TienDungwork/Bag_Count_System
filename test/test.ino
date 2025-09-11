@@ -73,7 +73,7 @@ const char* ap_ssid = "BagCounter_Config";
 const char* ap_password = "12345678";
 
 //----------------------------------------Network & MQTT config
-String mqtt_server = "192.168.1.160";  // Địa chỉ IP của máy tính chạy broker local
+String mqtt_server = "192.168.41.103";  // Địa chỉ IP của máy tính chạy broker local
 String mqtt_server_backup = "test.mosquitto.org";  // Backup broker cũng là local
 int mqtt_port = 1883;
 int mqtt_websocket_port = 8080;  // Cổng WebSocket cho MQTT
@@ -107,8 +107,8 @@ const unsigned long COUNT_PUBLISH_THROTTLE = 100;   // 30 giây
 const unsigned long COUNT_PUBLISH_INTERVAL = 100;  // 100ms cho count updates - faster real-time
 
 //----------------------------------------IP tĩnh config (Ethernet)
-IPAddress local_IP(192, 168, 1, 200);     // IP tĩnh Ethernet
-IPAddress gateway(192, 168, 1, 1);      // Gateway router của bạn
+IPAddress local_IP(192, 168, 41, 200);     // IP tĩnh Ethernet
+IPAddress gateway(192, 168, 41, 1);      // Gateway router của bạn
 IPAddress subnet(255, 255, 255, 0);       // Subnet mask
 IPAddress primaryDNS(8, 8, 8, 8);         // DNS
 IPAddress secondaryDNS(8, 8, 4, 4);     // DNS phụ (Google DNS)
@@ -212,6 +212,7 @@ String bagType = "bao";
 String productCode = "";  // Mã sản phẩm hiện tại được hiển thị trên LED
 String orderCode = "";    // Mã đơn hàng hiện tại
 String customerName = ""; // Tên khách hàng hiện tại
+String vehicleNumber = ""; // Số xe hiện tại
 int targetCount = 20;
 std::vector<String> bagTypes;
 
@@ -261,7 +262,7 @@ int connectingDots = 0;          // Số dấu chấm cho animation
 
 //----------------------------------------Data Storage variables
 DynamicJsonDocument productsData(4096);
-DynamicJsonDocument ordersData(16384); // Tăng từ 8192 lên 16384 để chứa nhiều đơn hàng hơn
+DynamicJsonDocument ordersData(65536); // Tăng chứa nhiều đơn hàng hơn
 bool dataLoaded = false;
 
 //----------------------------------------IR Remote variables
@@ -457,7 +458,7 @@ void handleIRCommand(int button) {
       mqtt.subscribe(TOPIC_CMD_BATCH);
       mqtt.subscribe(TOPIC_CONFIG);
     } else {
-      Serial.println("❌ Failed to reconnect MQTT for IR command");
+      Serial.println("Failed to reconnect MQTT for IR command");
     }
   }
   
@@ -890,13 +891,13 @@ void loadSettingsFromFile() {
 
 // TẠO FILE CÀI ĐẶT MẶC ĐỊNH (CHỈ CHẠY LẦN ĐẦU)
 void createDefaultSettingsFile() {
-  Serial.println("🔧 Creating default settings file...");
+  Serial.println("Creating default settings file...");
   
   JsonDocument doc;
   
   // Network settings - default values
-  doc["ipAddress"] = "192.168.1.200";
-  doc["gateway"] = "192.168.1.1";
+  doc["ipAddress"] = "192.168.41.200";
+  doc["gateway"] = "192.168.41.1";
   doc["subnet"] = "255.255.255.0";
   doc["dns1"] = "8.8.8.8";
   doc["dns2"] = "8.8.4.4";
@@ -912,7 +913,7 @@ void createDefaultSettingsFile() {
   doc["relayDelayAfterComplete"] = 5000;
   
   // MQTT settings - default values
-  doc["mqttServer"] = "192.168.1.160";
+  doc["mqttServer"] = "192.168.41.103";
   doc["mqttServerBackup"] = "test.mosquitto.org";
   doc["mqttPort"] = 1883;
   doc["mqttWebSocketPort"] = 8080;
@@ -933,7 +934,7 @@ void createDefaultSettingsFile() {
 
 // HÀM TẠO CÁC FILE MẶC ĐỊNH LẦN ĐẦU
 void createDefaultDataFiles() {
-  Serial.println("🔧 Creating default data files...");
+  Serial.println("Creating default data files...");
   
   // Create default products.json if not exists
   if (!LittleFS.exists("/products.json")) {
@@ -942,7 +943,7 @@ void createDefaultDataFiles() {
     if (file) {
       file.println("[]"); // Empty array
       file.close();
-      Serial.println("   ✅ Default products.json created");
+      Serial.println(" Default products.json created");
     }
   }
   
@@ -1042,7 +1043,7 @@ void loadProductsFromFile() {
     file.close();
     
     if (error) {
-      Serial.println("❌ Failed to parse products.json: " + String(error.c_str()) + " - recreating file");
+      Serial.println("Failed to parse products.json: " + String(error.c_str()) + " - recreating file");
       File newFile = LittleFS.open("/products.json", "w");
       if (newFile) {
         newFile.println("[]");
@@ -1888,7 +1889,7 @@ void publishCountUpdate() {
   Serial.println("DEBUG publishCountUpdate: preparing message...");
   
   DynamicJsonDocument doc(256);
-  doc["deviceId"] = conveyorName;  // ✅ SỬA: Sử dụng biến conveyorName thay vì chuỗi
+  doc["deviceId"] = conveyorName;  // SỬA: Sử dụng biến conveyorName thay vì chuỗi
   doc["count"] = totalCount;
   doc["target"] = targetCount;
   doc["type"] = bagType;
@@ -2387,6 +2388,9 @@ server.on("/webfonts/fa-solid-900.ttf", HTTP_GET, [](){
 
     String content = file.readString();
     file.close();
+    
+    Serial.println("History API: file size = " + String(content.length()) + " bytes");
+    Serial.println("History API: content preview = " + content.substring(0, min(200, (int)content.length())));
 
     // Try to parse and normalize older formats into the expected rich format
     DynamicJsonDocument doc(16384);
@@ -2403,6 +2407,7 @@ server.on("/webfonts/fa-solid-900.ttf", HTTP_GET, [](){
 
     if (doc.is<JsonArray>()) {
       JsonArray arr = doc.as<JsonArray>();
+      Serial.println("History API: found " + String(arr.size()) + " entries in array");
       for (JsonVariant v : arr) {
         JsonObject obj = out.createNestedObject();
 
@@ -2450,6 +2455,8 @@ server.on("/webfonts/fa-solid-900.ttf", HTTP_GET, [](){
     // Serialize normalized array and send
     String outStr;
     serializeJson(outDoc, outStr);
+    Serial.println("History API: returning " + String(out.size()) + " normalized entries");
+    Serial.println("History API: response size = " + String(outStr.length()) + " bytes");
     server.send(200, "application/json", outStr);
     Serial.println("History API called - returned normalized history array");
   });
@@ -3247,9 +3254,10 @@ server.on("/webfonts/fa-solid-900.ttf", HTTP_GET, [](){
       
       customerName = doc["customerName"].as<String>();  // Cập nhật biến global
       orderCode = doc["orderCode"].as<String>();        // Cập nhật biến global
+      vehicleNumber = doc["vehicleNumber"].as<String>(); // Cập nhật biến global
       Serial.println("Updated global customerName: " + customerName);
       Serial.println("Updated global orderCode: " + orderCode);
-      String vehicleNumber = doc["vehicleNumber"];
+      Serial.println("Updated global vehicleNumber: " + vehicleNumber);
       String productName = doc["productName"];
       int quantity = doc["quantity"];
       int warningQuantity = doc["warningQuantity"];
@@ -3346,6 +3354,13 @@ server.on("/webfonts/fa-solid-900.ttf", HTTP_GET, [](){
         Serial.println("Description: " + currentBatchDescription);
         Serial.println("Total Orders: " + String(totalOrdersInBatch));
         Serial.println("Batch Total Target: " + String(batchTotalTarget));
+        
+        // RESET TRẠNG THÁI KHI CHUYỂN BATCH MỚI
+        totalCount = 0;
+        isLimitReached = false;
+        isRunning = false;
+        isTriggerEnabled = false;
+        isCountingEnabled = false;
         
         // LƯU THÔNG TIN BATCH VÀO FILE
         saveBatchInfoToFile();
@@ -4556,8 +4571,8 @@ server.on("/webfonts/fa-solid-900.ttf", HTTP_GET, [](){
     autoReset = true;  // Bật tự động chuyển đơn hàng
     
     // Reset network về default
-    local_IP = IPAddress(192, 168, 1, 200);
-    gateway = IPAddress(192, 168, 1, 1);
+    local_IP = IPAddress(192, 168, 41, 200);
+    gateway = IPAddress(192, 168, 41, 1);
     subnet = IPAddress(255, 255, 255, 0);
     primaryDNS = IPAddress(8, 8, 8, 8);
     secondaryDNS = IPAddress(8, 8, 4, 4);
@@ -5062,14 +5077,27 @@ void updateCount() {
     Serial.println("DEBUG updateCount: incremented totalCount to " + String(totalCount));
     
     // Cập nhật executeCount trong ordersData cho đơn hàng hiện tại
-    JsonArray ordersArray = ordersData.as<JsonArray>();
-    for (size_t i = 0; i < ordersArray.size(); i++) {
-      JsonObject orderData = ordersArray[i];
-      if (orderData["id"].as<String>() == bagType) {
-        int currentExecuteCount = orderData["executeCount"] | 0;
-        orderData["executeCount"] = currentExecuteCount + 1;
-        Serial.println("Updated executeCount for order '" + bagType + "': " + String(currentExecuteCount + 1));
-        break;
+    // Tìm order hiện tại theo cả productName VÀ productCode
+    for (size_t i = 0; i < ordersData.size(); i++) {
+      JsonArray orders = ordersData[i]["orders"];
+      
+      for (size_t j = 0; j < orders.size(); j++) {
+        JsonObject order = orders[j];
+        String orderProductName = order["productName"].as<String>();
+        String orderProductCode = "";
+        if (order.containsKey("product") && order["product"].containsKey("code")) {
+          orderProductCode = order["product"]["code"].as<String>();
+        }
+        String status = order["status"].as<String>();
+        bool selected = order["selected"] | false;
+        
+        // Cập nhật executeCount CHỈ cho đơn hàng đang counting
+        if (orderProductName == bagType && orderProductCode == productCode && selected && status == "counting") {
+          int currentExecuteCount = order["executeCount"] | 0;
+          order["executeCount"] = currentExecuteCount + 1;
+          Serial.println("Updated executeCount for order '" + bagType + "' (code: " + productCode + "): " + String(currentExecuteCount + 1));
+          break;
+        }
       }
     }
     
@@ -5105,6 +5133,14 @@ void updateCount() {
       isBlinking = true;
       lastBlink = millis();
       
+      // LƯU THÔNG TIN ĐƠN HÀNG HIỆN TẠI TRƯỚC KHI CHUYỂN SANG ĐƠN MỚI
+      String completedCustomerName = customerName;
+      String completedOrderCode = orderCode;
+      String completedProductName = bagType;
+      String completedProductCode = productCode;
+      String completedVehicleNumber = vehicleNumber;
+      int completedTargetCount = targetCount;
+      
       // Lưu lịch sử với thêm thông tin loại - chỉ khi có thời gian thực
       String currentTime = (time(nullptr) > 24 * 3600) ? getTimeStr() : "Time not synced";
       history.push_back({currentTime, (int)totalCount, bagType});
@@ -5138,44 +5174,23 @@ void updateCount() {
 
         // Try to find the current order details from ordersData so we can
         // persist a richer history object (fields the web UI expects)
-        String customerName = "";
-        String productName = bagType;
-        String orderCode = "";
-        String vehicleNumber = "";
-        int plannedQuantity = 0;
-
-        for (size_t bi = 0; bi < ordersData.size(); bi++) {
-          JsonArray oarr = ordersData[bi]["orders"];
-          for (size_t oj = 0; oj < oarr.size(); oj++) {
-            JsonObject ord = oarr[oj];
-            bool selected = ord["selected"] | false;
-            String status = ord["status"] | "";
-            if (selected && (status == "counting" || status == "completed")) {
-              customerName = ord["customerName"] | "";
-              if (ord.containsKey("product") && ord["product"].is<JsonObject>() && ord["product"].containsKey("name")) {
-                productName = ord["product"]["name"].as<String>();
-              } else if (ord.containsKey("productName")) {
-                productName = ord["productName"].as<String>();
-              }
-              orderCode = ord["orderCode"] | "";
-              vehicleNumber = ord["vehicleNumber"] | "";
-              plannedQuantity = ord["quantity"] | 0;
-              break;
-            }
-          }
-          if (customerName.length() > 0) break;
-        }
+        // SỬ DỤNG THÔNG TIN ĐÃ LƯU CỦA ĐƠN HÀNG VỪA HOÀN THÀNH
+        String historyCustomerName = completedCustomerName;
+        String historyProductName = completedProductName;
+        String historyOrderCode = completedOrderCode;
+        String historyVehicleNumber = completedVehicleNumber;  // Sử dụng vehicleNumber đã lưu
+        int historyPlannedQuantity = completedTargetCount;
 
         // Append new entry with fields the web expects
         JsonObject newEntry = histArr.createNestedObject();
         newEntry["timestamp"] = currentTime;
-        newEntry["customerName"] = customerName;
-        newEntry["productName"] = productName;
-        newEntry["orderCode"] = orderCode;
-        newEntry["vehicleNumber"] = vehicleNumber;
-        newEntry["plannedQuantity"] = plannedQuantity;
-        newEntry["actualCount"] = (int)totalCount;
-        newEntry["batchType"] = bagType;
+        newEntry["customerName"] = historyCustomerName;
+        newEntry["productName"] = historyProductName;
+        newEntry["orderCode"] = historyOrderCode;
+        newEntry["vehicleNumber"] = historyVehicleNumber;
+        newEntry["plannedQuantity"] = historyPlannedQuantity;
+        newEntry["actualCount"] = completedTargetCount;  // Thực tế = mục tiêu khi hoàn thành
+        newEntry["batchType"] = completedProductName;
 
         // Save back to file
         File wf = LittleFS.open("/history.json", "w");
@@ -5216,7 +5231,11 @@ void updateCount() {
       // THÊM CHECK: Chỉ auto reset khi thực sự hoàn thành đơn hàng (target > 0 và đã đếm xong)
       if (autoReset && totalCount >= targetCount && targetCount > 0 && totalCount > 0) {
         Serial.println("Auto Reset enabled - resetting CURRENT ORDER only");
-        delay(2000); // Chờ 2 giây để hiển thị kết quả hoàn thành
+        
+        // ✅ HIỂN THỊ SỐ ĐẾM CUỐI TRONG 3 GIÂY TRƯỚC KHI RESET
+        Serial.println("Displaying final count " + String(totalCount) + " for 3 seconds before reset...");
+        updateDisplay(); // Đảm bảo LED hiển thị số cuối
+        delay(3000); // Hiển thị số đếm cuối trong 3 giây
         
         //  CHỈ RESET ĐƠN HÀNG HIỆN TẠI, GIỮ NGUYÊN DANH SÁCH
         String completedOrderType = bagType;  // Lưu tên đơn vừa hoàn thành
@@ -5242,46 +5261,73 @@ void updateCount() {
         bool foundNextOrder = false;
         Serial.println("Searching for next order by orderNumber...");
         
-        // Tìm orderNumber hiện tại từ ordersData
+        // Tìm orderNumber hiện tại từ ordersData - TÌM ĐƠN VỪA HOÀN THÀNH  
         int currentOrderNumber = 0;
-        String currentBatchIdStr = "";
+        String currentProductCode = productCode; // Lưu productCode của đơn vừa hoàn thành
         
-        // Duyệt ordersData để tìm đơn hàng hiện tại đang đếm
+        Serial.println("Completed order info: productName=" + completedOrderType + ", productCode=" + currentProductCode);
+        
+        // Duyệt ordersData để tìm đơn hàng vừa hoàn thành theo productName VÀ productCode TRONG BATCH HIỆN TẠI
         for (size_t i = 0; i < ordersData.size(); i++) {
-          JsonArray orders = ordersData[i]["orders"];
-          currentBatchIdStr = ordersData[i]["id"].as<String>();
+          String batchId = ordersData[i]["id"].as<String>();
           
+          // CHỈ TÌM TRONG BATCH ĐANG ACTIVE
+          if (batchId != currentBatchId) {
+            continue;
+          }
+          
+          JsonArray orders = ordersData[i]["orders"];
           for (size_t j = 0; j < orders.size(); j++) {
             JsonObject order = orders[j];
-            String status = order["status"].as<String>();
+            String orderProductName = order["productName"].as<String>();
+            String orderProductCode = "";
+            if (order.containsKey("product") && order["product"].containsKey("code")) {
+              orderProductCode = order["product"]["code"].as<String>();
+            }
             bool selected = order["selected"] | false;
             
-            if (status == "counting" && selected) {
+            // Tìm đơn có cùng productName VÀ productCode với đơn vừa hoàn thành VÀ được chọn
+            if (orderProductName == completedOrderType && orderProductCode == currentProductCode && selected) {
               currentOrderNumber = order["orderNumber"] | 0;
-              Serial.println("Current order found: orderNumber=" + String(currentOrderNumber));
+              Serial.println("Completed order found: orderNumber=" + String(currentOrderNumber) + ", product=" + orderProductName + ", code=" + orderProductCode);
+              
+              // Đánh dấu đơn này là completed trong ordersData
+              order["status"] = "completed";
               break;
             }
           }
           if (currentOrderNumber > 0) break;
         }
         
-        // Tìm đơn hàng tiếp theo (orderNumber + 1) trong các đơn được chọn
+        // Tìm đơn hàng tiếp theo (orderNumber + 1) TRONG CÙNG BATCH
         int nextOrderNumber = currentOrderNumber + 1;
-        Serial.println("Looking for next order with orderNumber=" + String(nextOrderNumber));
+        Serial.println("Looking for next order with orderNumber=" + String(nextOrderNumber) + " in batch=" + currentBatchId);
         
+        // CHỈ TÌM TRONG BATCH HIỆN TẠI
         for (size_t i = 0; i < ordersData.size(); i++) {
+          String batchId = ordersData[i]["id"].as<String>();
+          
+          // CHỈ TÌM TRONG BATCH ĐANG ACTIVE
+          if (batchId != currentBatchId) {
+            Serial.println("Skipping batch " + batchId + " (not current batch)");
+            continue;
+          }
+          
           JsonArray orders = ordersData[i]["orders"];
+          Serial.println("Searching in batch " + batchId + " with " + String(orders.size()) + " orders");
           
           for (size_t j = 0; j < orders.size(); j++) {
             JsonObject order = orders[j];
             int orderNumber = order["orderNumber"] | 0;
             bool selected = order["selected"] | false;
             String status = order["status"].as<String>();
+            String productName = order["productName"].as<String>();
             
-            // Tìm đơn có orderNumber tiếp theo và được chọn
-            if (orderNumber == nextOrderNumber && selected && status != "completed") {
+            Serial.println("  Order " + String(orderNumber) + ": " + productName + " (selected=" + String(selected) + ", status=" + status + ")");
+            
+            // Tìm đơn có orderNumber tiếp theo và được chọn và status = "waiting"
+            if (orderNumber == nextOrderNumber && selected && status == "waiting") {
               // CẬP NHẬT THÔNG TIN ĐƠN MỚI
-              String productName = order["productName"].as<String>();
               String newProductCode = "";
               if (order.containsKey("product") && order["product"].containsKey("code")) {
                 newProductCode = order["product"]["code"].as<String>();
@@ -5313,18 +5359,6 @@ void updateCount() {
                 newCfg.status = "RUNNING";
                 bagConfigs.push_back(newCfg);
                 Serial.println("Created new bagConfig with warn: " + String(warningQuantity));
-              }
-              
-              // Cập nhật trạng thái đơn cũ thành completed
-              for (size_t x = 0; x < ordersData.size(); x++) {
-                JsonArray oldOrders = ordersData[x]["orders"];
-                for (size_t y = 0; y < oldOrders.size(); y++) {
-                  JsonObject oldOrder = oldOrders[y];
-                  if (oldOrder["orderNumber"] == currentOrderNumber && oldOrder["selected"]) {
-                    oldOrder["status"] = "completed";
-                    break;
-                  }
-                }
               }
               
               // Cập nhật trạng thái đơn mới thành counting
@@ -5363,6 +5397,7 @@ void updateCount() {
           isRunning = false;
           isTriggerEnabled = false;
           isCountingEnabled = false;
+          currentSystemStatus = "RESET";
           
           // Reset count về 0
           totalCount = 0;
@@ -5370,6 +5405,7 @@ void updateCount() {
           
           // Thông báo hoàn thành batch
           publishAlert("BATCH_COMPLETED", "Hoàn thành tất cả đơn hàng trong batch hiện tại!");
+          publishStatusMQTT();
           
           Serial.println("Batch completed - System stopped. Please select new batch to continue.");
         } else {

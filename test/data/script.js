@@ -50,7 +50,7 @@ let settings = {
   autoReset: false,
   brightness: 35,
   relayDelayAfterComplete: 5000,
-  mqttServer: '192.168.41.101',
+  mqttServer: '192.168.41.103',
   mqttServerBackup: 'test.mosquitto.org',
   mqttPort: 1883,
   mqttWebSocketPort: 8080
@@ -314,10 +314,42 @@ async function loadHistoryFromESP32() {
     const response = await fetch('/api/history');
     if (response.ok) {
       const esp32History = await response.json();
-      // Always use server history (even if empty) to avoid localStorage masking server data
-      countingHistory = Array.isArray(esp32History) ? esp32History : [];
-      localStorage.setItem('countingHistory', JSON.stringify(countingHistory));
-      console.log('History loaded from ESP32 (may be empty):', countingHistory.length, 'records');
+      console.log('🔄 ESP32 History Response:', esp32History);
+      console.log('🔄 ESP32 History Length:', esp32History.length);
+      
+      if (Array.isArray(esp32History)) {
+        // Merge với history hiện tại và deduplicate
+        const existingHistory = JSON.parse(localStorage.getItem('countingHistory') || '[]');
+        console.log('📦 Existing LocalStorage History:', existingHistory.length, 'records');
+        
+        const allHistory = [...existingHistory, ...esp32History];
+        console.log('🔗 Combined History Before Dedup:', allHistory.length, 'records');
+        
+        // Deduplicate dựa trên timestamp và orderCode
+        const uniqueHistory = allHistory.filter((entry, index, arr) => {
+          const isDuplicate = arr.findIndex(e => 
+            e.timestamp === entry.timestamp &&
+            e.orderCode === entry.orderCode &&
+            e.customerName === entry.customerName
+          ) !== index;
+          
+          if (isDuplicate) {
+            console.log('🗑️ Removing duplicate:', entry);
+          }
+          
+          return !isDuplicate;
+        });
+        
+        console.log('✅ Final Unique History:', uniqueHistory.length, 'records');
+        console.log('✅ Final History Data:', uniqueHistory);
+        
+        countingHistory = uniqueHistory;
+        localStorage.setItem('countingHistory', JSON.stringify(countingHistory));
+        console.log('History merged and deduplicated:', countingHistory.length, 'records');
+      } else {
+        countingHistory = [];
+      }
+      
       updateHistoryTable();
       updateHistoryListElement();
       return true;
@@ -846,7 +878,7 @@ async function handleMQTTMessage(topic, data) {
       break;
       
     case 'bagcounter/alerts':
-      handleDeviceAlert(data);
+      await handleDeviceAlert(data);
       break;
       
     case 'bagcounter/sensor':
@@ -1066,6 +1098,9 @@ async function handleCountUpdate(data) {
         // REAL-TIME UI UPDATE (throttled)
         updateOrderTable();
         
+        // Update executeCount với số từ ESP32 (tổng batch count)
+        updateExecuteCountDisplay(batchTotalCount, 'handleCountUpdate-MQTT');
+        
         // Chỉ update overview nếu count thực sự thay đổi
         if (oldCount !== newCurrentCount) {
           updateOverview();
@@ -1111,7 +1146,7 @@ async function handleCountUpdate(data) {
   }
 }
 
-function handleDeviceAlert(data) {
+async function handleDeviceAlert(data) {
   console.log('Device Alert:', data);
   
   switch (data.alertType) {
@@ -1122,10 +1157,67 @@ function handleDeviceAlert(data) {
       showNotification(`${data.message}`, 'success');
       // REMOVE handleOrderCompletion từ alert - để logic chính xác trong updateStatusFromDevice
       console.log('COMPLETED alert received but ignored - using updateStatusFromDevice logic instead');
+      
+      // 🔄 AUTO-REFRESH HISTORY when order completed
+      console.log('🔄 Auto-refreshing history after order completion...');
+      setTimeout(async () => {
+        await loadHistoryFromESP32();
+        console.log('✅ History refreshed after order completion');
+      }, 1000); // Delay 1s để ESP32 kịp lưu file
+      
       // handleOrderCompletion(data);
+      break;
+    case 'BATCH_COMPLETED':
+      showNotification(`${data.message}`, 'success');
+      console.log('BATCH_COMPLETED alert received - updating UI state');
+      
+      // 🔄 AUTO-REFRESH HISTORY when batch completed
+      console.log('🔄 Auto-refreshing history after batch completion...');
+      setTimeout(async () => {
+        await loadHistoryFromESP32();
+        console.log('✅ History refreshed after batch completion');
+        
+        // 🔄 Double-check refresh sau 3s nữa để đảm bảo đơn cuối được lưu
+        setTimeout(async () => {
+          console.log('🔄 Double-check history refresh for last order...');
+          await loadHistoryFromESP32();
+          console.log('✅ Double-check history refresh completed');
+        }, 3000);
+      }, 2000); // Delay 2s để ESP32 kịp lưu đơn cuối
+      
+      // ⏹️ FORCE STOP và RESET counting state khi batch hoàn thành
+      countingState.isActive = false;
+      countingState.currentOrderIndex = 0;
+      countingState.totalCounted = 0;
+      
+      // 🛑 Gửi STOP command để ESP32 về trạng thái chờ
+      console.log('🛑 Sending STOP command after batch completion');
+      await sendMQTTCommand('STOP');
+      
+      // Update button states về reset
+      updateButtonStates('reset');
+      updateOverview();
+      
+      // 🔄 Force refresh UI để đảm bảo trạng thái đúng
+      setTimeout(() => {
+        updateOverview();
+        updateButtonStates('reset');
+      }, 500);
+      
+      //showNotification('Danh sách đơn hàng đã hoàn thành!', 'info');
       break;
     case 'ERROR':
       showNotification(`${data.message}`, 'error');
+      break;
+    case 'AUTO_RESET':
+      showNotification(`${data.message}`, 'info');
+      console.log('AUTO_RESET alert received - refreshing history');
+      
+      // 🔄 AUTO-REFRESH HISTORY when auto reset (order completed and switched)
+      setTimeout(async () => {
+        await loadHistoryFromESP32();
+        console.log('✅ History refreshed after auto reset');
+      }, 1000); // Delay 1s để ESP32 kịp lưu file
       break;
     case 'IR_COMMAND':
       showNotification(`${data.message}`, 'info');
@@ -1925,7 +2017,7 @@ async function saveBatch() {
   }
   
   const batch = {
-    id: currentBatchId || batchIdCounter++,
+    id: currentBatchId || Date.now(), // Sử dụng timestamp để đảm bảo unique
     name: batchName,
     orders: [...currentOrderBatch],
     createdAt: new Date().toISOString(),
@@ -2095,6 +2187,28 @@ function switchBatch() {
   if (batchId) {
     const batch = orderBatches.find(b => b.id == batchId); // Tìm theo id
     if (batch) {
+      // RESET COUNTING STATE KHI CHUYỂN BATCH
+      console.log('Resetting counting state for new batch');
+      countingState.isActive = false;
+      countingState.currentOrderIndex = 0;
+      countingState.totalCounted = 0;
+      countingState.totalPlanned = 0;
+      
+      console.log('Sending STOP command when switching to new batch');
+      try {
+        sendMQTTCommand('bagcounter/cmd/stop', {
+          action: 'STOP',
+          timestamp: Date.now(),
+          source: 'web'
+        });
+      } catch (error) {
+        console.error('Error sending STOP command:', error);
+      }
+      
+      // Reset executeCount display về 0
+      currentExecuteCount = 0;
+      updateExecuteCountDisplay(0, 'switchBatch-reset');
+      
       // Set as active batch
       orderBatches.forEach(b => b.isActive = false);
       batch.isActive = true;
@@ -2122,6 +2236,9 @@ function switchBatch() {
       updateCurrentBatchSelect();
       updateBatchDisplay();
       updateOverview();
+      
+      // Update button states về reset khi chuyển batch
+      updateButtonStates('reset');
       
       showNotification(`Đã chuyển sang danh sách: ${batch.name}`, 'success');
     } else {
@@ -2628,6 +2745,10 @@ async function startCounting() {
   }
   countingState.totalCounted += selectedOrders[currentOrderIndex].currentCount || 0;
   
+  // RESET executeCount display khi bắt đầu counting mới
+  currentExecuteCount = 0;
+  updateExecuteCountDisplay(countingState.totalCounted, 'startCounting-reset');
+  
   console.log('Bat dau dem tu don:', currentOrderIndex + 1, 'cua', selectedOrders.length);
   console.log('Tong ke hoach:', countingState.totalPlanned);
   console.log('Da dem:', countingState.totalCounted);
@@ -2769,6 +2890,11 @@ async function resetCounting() {
   countingState.isActive = false;
   countingState.currentOrderIndex = 0;
   countingState.totalCounted = 0;
+  
+  // Reset executeCount display về 0
+  currentExecuteCount = 0;
+  updateExecuteCountDisplay(0, 'resetCounting');
+  
   updateUIForReset();
   
   try {
@@ -3132,11 +3258,10 @@ function updateOverview() {
   
   // Update plan vs execute counts
   const planCountElement = document.getElementById('planCount');
-  const executeCountElement = document.getElementById('executeCount');
   
   if (!activeBatch) {
     if (planCountElement) planCountElement.textContent = '0';
-    if (executeCountElement) executeCountElement.textContent = '0';
+    updateExecuteCountDisplay(0, 'updateOverview-no-batch');
     // Reset button states khi không có batch
     updateButtonStates('reset');
     return;
@@ -3150,7 +3275,7 @@ function updateOverview() {
   // console.log('Orders:', orders.length, 'Selected:', selectedOrders.length, 'Planned:', totalPlanned, 'Counted:', totalCounted);
   
   if (planCountElement) planCountElement.textContent = totalPlanned;
-  if (executeCountElement) executeCountElement.textContent = totalCounted;
+  updateExecuteCountDisplay(totalCounted, 'updateOverview-batch-total');
   
   // Cập nhật trạng thái nút dựa trên trạng thái đếm hiện tại
   const hasCountingOrders = selectedOrders.some(o => o.status === 'counting');
@@ -3465,13 +3590,19 @@ function loadOrderBatches() {
       let maxOrderId = 0;
       
       orderBatches.forEach(batch => {
-        if (batch.id > maxBatchId) maxBatchId = batch.id;
+        // Chỉ update maxBatchId nếu batch.id là số (legacy batches)
+        if (typeof batch.id === 'number' && batch.id > maxBatchId) {
+          maxBatchId = batch.id;
+        }
         batch.orders.forEach(order => {
           if (order.id > maxOrderId) maxOrderId = order.id;
         });
       });
       
-      batchIdCounter = maxBatchId + 1;
+      // Chỉ update batchIdCounter nếu có legacy batches với numeric ID
+      if (maxBatchId > 0) {
+        batchIdCounter = maxBatchId + 1;
+      }
       orderIdCounter = maxOrderId + 1;
       
       console.log('Updated counters - batchIdCounter:', batchIdCounter, 'orderIdCounter:', orderIdCounter);
@@ -4238,6 +4369,9 @@ async function updateStatusFromDevice(data) {
         // Cập nhật tổng đếm
         countingState.totalCounted = totalCountFromDevice;
         
+        // Update executeCount với tổng count từ ESP32
+        updateExecuteCountDisplay(totalCountFromDevice, 'updateStatusFromDevice-polling');
+        
         // console.log(`Đơn ${currentOrderIndex + 1}/${selectedOrders.length}: ${currentOrder.customerName}`);
         // console.log(`ESP32 total: ${totalCountFromDevice} | Đã xong: ${completedCount} | Đơn hiện tại: ${currentOrder.currentCount}/${currentOrder.quantity}`);
         // console.log(`Tổng batch: ${countingState.totalCounted}/${countingState.totalPlanned}`);
@@ -4260,19 +4394,32 @@ async function updateStatusFromDevice(data) {
           // Lưu đơn hàng vào lịch sử đơn lẻ
           const historyEntry = {
             timestamp: new Date().toISOString(),
-            customerName: currentOrder.customerName,
-            productName: currentOrder.product?.name || currentOrder.productName,
-            orderCode: currentOrder.orderCode,
-            vehicleNumber: currentOrder.vehicleNumber,
-            plannedQuantity: currentOrder.quantity,
-            actualCount: currentOrder.currentCount
+            customerName: currentOrder.customerName || 'Khách hàng chưa xác định',
+            productName: currentOrder.product?.name || currentOrder.productName || 'Sản phẩm chưa xác định',
+            orderCode: currentOrder.orderCode || '',
+            vehicleNumber: currentOrder.vehicleNumber || 'Chưa có địa chỉ',
+            plannedQuantity: currentOrder.quantity || 0,
+            actualCount: currentOrder.currentCount || 0
           };
           
           console.log('ĐANG LƯU VÀO LỊCH SỬ:', historyEntry);
           console.log('countingHistory trước khi thêm:', countingHistory.length);
           
-          countingHistory.push(historyEntry);
-          saveHistory();
+          // Kiểm tra xem entry này đã tồn tại chưa để tránh duplicate
+          const isDuplicate = countingHistory.some(h => 
+            h.customerName === historyEntry.customerName &&
+            h.orderCode === historyEntry.orderCode &&
+            h.productName === historyEntry.productName &&
+            Math.abs(new Date(h.timestamp) - new Date(historyEntry.timestamp)) < 5000 // 5 giây
+          );
+          
+          if (!isDuplicate) {
+            countingHistory.push(historyEntry);
+            saveHistory();
+            console.log('Lịch sử đã được lưu');
+          } else {
+            console.log('Entry bị duplicate, bỏ qua');
+          }
           
           console.log('countingHistory sau khi thêm:', countingHistory.length);
           console.log('localStorage countingHistory:', localStorage.getItem('countingHistory') ? 'EXISTS' : 'NULL');
@@ -5293,22 +5440,36 @@ function startStatusPolling() {
   }, 3000); // 3 seconds instead of 1 second for fallback mode
 }
 
+// Biến global để track executeCount hiện tại - SINGLE SOURCE OF TRUTH
+let currentExecuteCount = 0;
+
+// Hàm cập nhật executeCount duy nhất - tránh conflicts
+function updateExecuteCountDisplay(newCount, source = 'unknown') {
+  // Chỉ cập nhật nếu số mới lớn hơn hoặc bằng (tránh rollback)
+  if (newCount >= currentExecuteCount) {
+    currentExecuteCount = newCount;
+    const executeCountElement = document.getElementById('executeCount');
+    if (executeCountElement) {
+      executeCountElement.textContent = currentExecuteCount;
+      console.log(`ExecuteCount updated to ${currentExecuteCount} (source: ${source})`);
+    }
+  } else {
+    console.log(`ExecuteCount update ignored: ${newCount} < ${currentExecuteCount} (source: ${source})`);
+  }
+}
+
 // Hàm cập nhật chỉ hiển thị khi không có batch hoặc không có orders được chọn
 function updateDisplayOnly(data) {
-  const executeCountElement = document.getElementById('executeCount');
-  if (executeCountElement) {
-    executeCountElement.textContent = data.count || 0;
+  if (data.count !== undefined) {
+    updateExecuteCountDisplay(data.count, 'displayOnly');
   }
   
   updateDisplayElements(data);
 }
 
-// Hàm cập nhật các elements hiển thị
+// Hàm cập nhật các elements hiển thị (KHÔNG BAO GỒM executeCount)
 function updateDisplayElements(data) {
-  const executeCountElement = document.getElementById('executeCount');
-  if (executeCountElement) {
-    executeCountElement.textContent = data.count || 0;
-  }
+  // REMOVE executeCount update từ đây - sử dụng updateExecuteCountDisplay thay thế
   
   const startTimeElement = document.getElementById('startTime');
   if (startTimeElement && data.startTime) {
