@@ -435,7 +435,7 @@ void handleIRCommand(int button) {
         Serial.println(" IR Remote: CUSTOM - Đóng relay 5s");
         digitalWrite(START_LED_PIN, HIGH); // Đóng relay
         unsigned long relayCustomStart = millis();
-        while (millis() - relayCustomStart < 5000) {
+        while (millis() - relayCustomStart < 10000) {
           delay(10); // Giữ relay trong 5s
         }
         digitalWrite(START_LED_PIN, LOW); // Ngắt relay
@@ -910,7 +910,7 @@ void createDefaultSettingsFile() {
   doc["bagDetectionDelay"] = 200;
   doc["minBagInterval"] = 100;
   doc["autoReset"] = true;  // Enable automatic order switching
-  doc["relayDelayAfterComplete"] = 5000;
+  doc["relayDelayAfterComplete"] = 10000;
   
   // MQTT settings - default values
   doc["mqttServer"] = "192.168.41.103";
@@ -5520,9 +5520,9 @@ void updateDoneLED() {
           Serial.println("   Count: " + String(totalCount) + "/" + String(cfg.target) + 
                         ", Warning at: " + String(warningThreshold));
         } else if (isWarningLedActive) {
-          // Đang trong thời gian cảnh báo 5 giây
-          if (millis() - warningLedStartTime < 5000) {
-            doneLedOn = true;  // Giữ LED BẬT trong 5 giây
+          // Đang trong thời gian cảnh báo 10 giây
+          if (millis() - warningLedStartTime < 10000) {
+            doneLedOn = true;  // Giữ LED BẬT trong 10 giây
           } else {
             // Hết 5 giây, tắt LED cảnh báo
             isWarningLedActive = false;
@@ -5667,7 +5667,7 @@ void setup() {
   
   // Khởi tạo IR Remote
   irrecv.enableIRIn();
-  Serial.println("✅ IR Remote initialized");
+  Serial.println("IR Remote initialized");
   
   // Tắt LED ban đầu
   digitalWrite(START_LED_PIN, LOW);  // Đèn START tắt (HIGH)

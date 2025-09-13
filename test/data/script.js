@@ -2071,6 +2071,9 @@ async function saveBatch() {
     //showNotification('Lưu danh sách thành công nhưng có lỗi đồng bộ với ESP32', 'warning');
   }
   
+
+
+  
   // Reset form
   document.getElementById('batchInfo').style.display = 'none';
   document.getElementById('orderFormContainer').style.display = 'none';
@@ -2240,7 +2243,7 @@ function switchBatch() {
       // Update button states về reset khi chuyển batch
       updateButtonStates('reset');
       
-      showNotification(`Đã chuyển sang danh sách: ${batch.name}`, 'success');
+      //showNotification(`Đã chuyển sang danh sách: ${batch.name}`, 'success');
     } else {
       console.error('Batch not found:', batchId);
     }
@@ -2713,10 +2716,17 @@ async function startCounting() {
   
   // KIỂM TRA XEM ĐÃ CÓ ĐƠN HÀNG ĐANG ĐẾM HAY CHƯA
   let currentOrderIndex = selectedOrders.findIndex(o => o.status === 'counting');
+  let isResumeFromPaused = false; // Flag để biết có phải resume từ paused không
   
   if (currentOrderIndex === -1) {
     // CHƯA CÓ ĐƠN HÀNG NÀO ĐANG ĐẾM - TÌM ĐƠN TIẾP THEO
     currentOrderIndex = selectedOrders.findIndex(o => o.status === 'waiting' || o.status === 'paused');
+    
+    // Kiểm tra nếu tìm thấy đơn hàng paused
+    if (currentOrderIndex !== -1 && selectedOrders[currentOrderIndex].status === 'paused') {
+      isResumeFromPaused = true;
+      console.log('Resuming from paused order at index:', currentOrderIndex);
+    }
     
     if (currentOrderIndex === -1) {
       // TẤT CẢ ĐÃ HOÀN THÀNH - BẮT ĐẦU LẠI TỪ ĐẦU
@@ -2808,11 +2818,15 @@ async function startCounting() {
       productCode: productCode,
       target: currentOrder.quantity,
       warningQuantity: currentOrder.warningQuantity || 5,  // Sử dụng warningQuantity của đơn hàng
-      keepCount: false, // Reset count khi bắt đầu mới
+      keepCount: isResumeFromPaused, 
       isRunning: true   // Đảm bảo ESP32 biết đang chạy
     });
     
-    console.log('Sent current order info to ESP32 for LED display:', productCode, productName);
+    if (isResumeFromPaused) {
+      //console.log('Sent RESUME command to ESP32 - keepCount: true');
+    } else {
+      //console.log('Sent START NEW command to ESP32 - keepCount: false');
+    }
     
     // updateUIForStart(); // Đã di chuyển lên trên
     saveOrderBatches();
@@ -4502,7 +4516,7 @@ async function updateStatusFromDevice(data) {
               console.error('LỖI CẬP NHẬT TARGET:', error);
             }
             
-            showNotification(`Chuyển sang đơn ${countingState.currentOrderIndex + 1}: ${nextOrder.customerName}`, 'info');
+            //showNotification(`Chuyển sang đơn ${countingState.currentOrderIndex + 1}: ${nextOrder.customerName}`, 'info');
             
           } else {
             // ĐÂY LÀ HOÀN THÀNH TẤT CẢ
@@ -4605,7 +4619,7 @@ async function moveToNextOrder() {
       
       // Lưu batch vào lịch sử
       saveBatchToCountingHistory(activeBatch, selectedOrders);
-      showNotification(`🎉 Hoàn thành tất cả ${selectedOrders.length} đơn hàng!`, 'success');
+      showNotification(`Hoàn thành tất cả ${selectedOrders.length} đơn hàng!`, 'success');
     }
   }
   
