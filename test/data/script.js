@@ -923,6 +923,11 @@ async function updateDeviceStatus(data) {
             orderToStart.status = 'counting';
             countingState.currentOrderIndex = selectedOrders.indexOf(orderToStart);
             console.log('Set order to counting:', countingState.currentOrderIndex + 1);
+            
+            // GỬI DANH SÁCH ĐƠN ĐƯỢC CHỌN KHI IR REMOTE START
+            console.log('IR Remote START - Sending selected orders to ESP32...');
+            await sendSelectedOrdersToESP32(activeBatch);
+            
             console.log('Force saving counting orders to ESP32...');
             await sendOrderBatchesToESP32(); // FORCE SYNC với ESP32
             updateOrderTable();
@@ -2434,6 +2439,7 @@ function selectAllOrders(checked) {
   for (let i = startIndex; i < endIndex; i++) {
     activeBatch.orders[i].selected = checked;
   }
+  // Sẽ gửi khi bắt đầu đếm
   
   saveOrderBatches();
   updateOrderTable();
@@ -2483,6 +2489,8 @@ function selectOrder(orderId, checked) {
         console.error('Failed to send order to ESP32:', error);
       });
     }
+
+    // Sẽ gửi khi bắt đầu đếm
     
     saveOrderBatches();
     updateOverview();
@@ -2597,6 +2605,42 @@ function updateOrderTable() {
   }
   
   updateTotalInfo(orders.filter(o => o.selected).length, orders.length);
+}
+
+// GỬI DANH SÁCH ĐƠN ĐƯỢC CHỌN ĐẾN ESP32
+async function sendSelectedOrdersToESP32(batch) {
+  if (!batch || !batch.orders) {
+    console.log('No batch or orders to send');
+    return;
+  }
+  
+  const selectedOrders = batch.orders.filter(o => o.selected);
+  const selectedOrderIds = selectedOrders.map(o => o.id);
+  
+  console.log(`Sending ${selectedOrders.length} selected orders to ESP32:`, selectedOrderIds);
+  
+  try {
+    const response = await fetch('/api/select_orders', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        batchId: batch.id.toString(),
+        selectedOrders: selectedOrderIds
+      })
+    });
+    
+    if (response.ok) {
+      const result = await response.json();
+      console.log('Selected orders sent to ESP32 successfully:', result);
+    } else {
+      const errorText = await response.text();
+      console.error('Failed to send selected orders:', errorText);
+    }
+  } catch (error) {
+    console.error('Network error sending selected orders:', error);
+  }
 }
 
 function updateTotalInfo(selected, total) {
@@ -2792,6 +2836,10 @@ async function startCounting() {
   };
   
   console.log('Sending batch info to ESP32:', batchInfo);
+  
+  // GỬI DANH SÁCH ĐƠN ĐƯỢC CHỌN ĐẾN ESP32 KHI BẮT ĐẦU
+  console.log('Sending selected ordersESP32');
+  await sendSelectedOrdersToESP32(activeBatch);
   
   // CẬP NHẬT UI NGAY LẬP TỨC TRƯỚC KHI GỬI COMMAND
   updateUIForStart();

@@ -2579,6 +2579,29 @@ server.on("/webfonts/fa-solid-900.ttf", HTTP_GET, [](){
           bagConfigs.push_back(newCfg);
         }
         
+        // Tìm và đánh dấu đơn hiện tại là SELECTED
+        for (size_t i = 0; i < ordersData.size(); i++) {
+          JsonArray orders = ordersData[i]["orders"];
+          
+          for (size_t j = 0; j < orders.size(); j++) {
+            JsonObject order = orders[j];
+            String orderProductCode = "";
+            if (order.containsKey("product") && order["product"].containsKey("code")) {
+              orderProductCode = order["product"]["code"].as<String>();
+            }
+            String orderOrderCode = order["orderCode"].as<String>();
+            
+            // Đánh dấu đơn hiện tại là SELECTED
+            if (orderProductCode == productCodeFromWeb && orderOrderCode == orderCode) {
+              order["selected"] = true;
+              Serial.println("Marked order with productCode " + productCodeFromWeb + " as SELECTED");
+            }
+          }
+        }
+        
+        // Lưu thay đổi vào file
+        saveOrdersToFile();
+        
         saveBagConfigsToFile();
         needUpdate = true;
         
@@ -4495,6 +4518,63 @@ server.on("/webfonts/fa-solid-900.ttf", HTTP_GET, [](){
     }
   });
   
+  // API cập nhật đơn được chọn
+  server.on("/api/select_orders", HTTP_POST, [](){
+    server.sendHeader("Access-Control-Allow-Origin", "*");
+    
+    if (server.hasArg("plain")) {
+      DynamicJsonDocument doc(2048);
+      DeserializationError error = deserializeJson(doc, server.arg("plain"));
+      
+      if (error) {
+        Serial.println("JSON parsing failed: " + String(error.c_str()));
+        server.send(400, "application/json", "{\"status\":\"Error\",\"message\":\"Invalid JSON\"}");
+        return;
+      }
+      
+      String batchId = doc["batchId"].as<String>();
+      JsonArray selectedOrders = doc["selectedOrders"];
+      
+      Serial.println("Updating selected orders for batch: " + batchId);
+      Serial.println("Selected orders count: " + String(selectedOrders.size()));
+      
+      // Tìm batch và cập nhật selected status
+      bool batchFound = false;
+      for (size_t i = 0; i < ordersData.size(); i++) {
+        if (ordersData[i]["id"].as<String>() == batchId) {
+          batchFound = true;
+          JsonArray orders = ordersData[i]["orders"];
+          
+          // Reset tất cả về false
+          for (size_t j = 0; j < orders.size(); j++) {
+            orders[j]["selected"] = false;
+          }
+          
+          // Set selected = true cho các đơn được chọn
+          for (JsonVariant selectedId : selectedOrders) {
+            int orderId = selectedId.as<int>();
+            for (size_t j = 0; j < orders.size(); j++) {
+              if (orders[j]["id"] == orderId) {
+                orders[j]["selected"] = true;
+                Serial.println("Order ID " + String(orderId) + " marked as SELECTED");
+              }
+            }
+          }
+          break;
+        }
+      }
+      
+      if (batchFound) {
+        saveOrdersToFile();
+        server.send(200, "application/json", "{\"status\":\"OK\",\"message\":\"Selected orders updated\"}");
+      } else {
+        server.send(404, "application/json", "{\"status\":\"Error\",\"message\":\"Batch not found\"}");
+      }
+    } else {
+      server.send(400, "application/json", "{\"status\":\"Error\",\"message\":\"No data provided\"}");
+    }
+  });
+  
   // API lưu/xóa history
   server.on("/api/history", HTTP_POST, [](){
     // Allow cross-origin requests for clients that may not be served from the ESP
@@ -5329,8 +5409,9 @@ void updateCount() {
             
             Serial.println("  Order " + String(orderNumber) + ": " + productName + " (selected=" + String(selected) + ", status=" + status + ")");
             
-            // Tìm đơn có orderNumber tiếp theo và được chọn và status = "waiting"
+            // CHỈ TÌM ĐƠN ĐƯỢC CHỌN VÀ ĐANG CHỜ
             if (orderNumber == nextOrderNumber && selected && status == "waiting") {
+              Serial.println("Found SELECTED next order: " + String(orderNumber) + " - " + productName);
               // CẬP NHẬT THÔNG TIN ĐƠN MỚI
               String newProductCode = "";
               if (order.containsKey("product") && order["product"].containsKey("code")) {
@@ -5393,10 +5474,7 @@ void updateCount() {
         }
         
         if (!foundNextOrder) {
-          // Không còn đơn hàng nào tiếp theo → DỪNG HẾT, KHÔNG RESTART
-          Serial.println("No more orders in current batch - All orders completed!");
-          Serial.println("Stopping system - Use batchSelector to choose next batch");
-          
+      
           // DỪNG HOÀN TOÀN hệ thống
           isRunning = false;
           isTriggerEnabled = false;
