@@ -1085,7 +1085,8 @@ async function handleCountUpdate(data) {
         const selectedOrders = foundBatch.orders.filter(o => o.selected);
         let batchTotalCount = 0;
         for (let order of selectedOrders) {
-          batchTotalCount += order.currentCount || 0;
+          // FIX: Ưu tiên executeCount từ ESP32, fallback về currentCount
+          batchTotalCount += order.executeCount || order.currentCount || 0;
         }
         
         // Cập nhật counting state
@@ -3284,9 +3285,15 @@ function updateOverview() {
   const orders = activeBatch.orders;
   const selectedOrders = orders.filter(o => o.selected);
   const totalPlanned = selectedOrders.reduce((sum, order) => sum + order.quantity, 0);
-  const totalCounted = selectedOrders.reduce((sum, order) => sum + (order.currentCount || 0), 0);
+  // FIX: Ưu tiên executeCount từ ESP32, fallback về currentCount
+  const totalCounted = selectedOrders.reduce((sum, order) => sum + (order.executeCount || order.currentCount || 0), 0);
   
-  // console.log('Orders:', orders.length, 'Selected:', selectedOrders.length, 'Planned:', totalPlanned, 'Counted:', totalCounted);
+  console.log('🔍 UpdateOverview Debug:');
+  console.log('- Orders:', orders.length, 'Selected:', selectedOrders.length);
+  console.log('- Planned:', totalPlanned, 'Counted:', totalCounted);
+  selectedOrders.forEach((order, i) => {
+    console.log(`- Order ${i+1}: executeCount=${order.executeCount || 0}, currentCount=${order.currentCount || 0}`);
+  });
   
   if (planCountElement) planCountElement.textContent = totalPlanned;
   updateExecuteCountDisplay(totalCounted, 'updateOverview-batch-total');

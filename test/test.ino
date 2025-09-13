@@ -5077,7 +5077,7 @@ void updateCount() {
     Serial.println("DEBUG updateCount: incremented totalCount to " + String(totalCount));
     
     // Cập nhật executeCount trong ordersData cho đơn hàng hiện tại
-    // Tìm order hiện tại theo cả productName VÀ productCode
+    // Tìm order hiện tại theo cả productName VÀ productCode VÀ status = "counting"
     for (size_t i = 0; i < ordersData.size(); i++) {
       JsonArray orders = ordersData[i]["orders"];
       
@@ -5091,11 +5091,11 @@ void updateCount() {
         String status = order["status"].as<String>();
         bool selected = order["selected"] | false;
         
-        // Cập nhật executeCount CHỈ cho đơn hàng đang counting
+        // Cập nhật executeCount CHỈ cho đơn hàng ĐANG counting
         if (orderProductName == bagType && orderProductCode == productCode && selected && status == "counting") {
           int currentExecuteCount = order["executeCount"] | 0;
           order["executeCount"] = currentExecuteCount + 1;
-          Serial.println("Updated executeCount for order '" + bagType + "' (code: " + productCode + "): " + String(currentExecuteCount + 1));
+          Serial.println("Updated executeCount for counting order '" + bagType + "' (code: " + productCode + ") from " + String(currentExecuteCount) + " to " + String(currentExecuteCount + 1));
           break;
         }
       }
@@ -5213,7 +5213,7 @@ void updateCount() {
       saveBagConfigsToFile();
       
       // MQTT: Publish completion alert
-      publishAlert("COMPLETED", "Hoàn thành đơn hàng: " + bagType + " - " + String(totalCount) + " bao");
+      publishAlert("COMPLETED", "Hoàn thành đơn hàng: " + productCode + " - " + String(totalCount) + " bao");
       
       // DEBUG: Check auto reset status
       Serial.println("DEBUG Auto Reset: enabled=" + String(autoReset) + ", totalCount=" + String(totalCount) + ", targetCount=" + String(targetCount));
@@ -5239,6 +5239,8 @@ void updateCount() {
         
         //  CHỈ RESET ĐƠN HÀNG HIỆN TẠI, GIỮ NGUYÊN DANH SÁCH
         String completedOrderType = bagType;  // Lưu tên đơn vừa hoàn thành
+        String completedProductCode = productCode; // Lưu product code của đơn vừa hoàn thành
+        int finalExecuteCount = totalCount; // LUU executeCount TRƯỚC KHI reset
         
         // Reset CHỈ số đếm, GIỮ NGUYÊN trạng thái running
         totalCount = 0;
@@ -5291,8 +5293,10 @@ void updateCount() {
               currentOrderNumber = order["orderNumber"] | 0;
               Serial.println("Completed order found: orderNumber=" + String(currentOrderNumber) + ", product=" + orderProductName + ", code=" + orderProductCode);
               
-              // Đánh dấu đơn này là completed trong ordersData
+              // Đánh dấu đơn này là completed trong ordersData VÀ lưu executeCount cuối cùng
               order["status"] = "completed";
+              order["executeCount"] = finalExecuteCount; // SỬ DỤNG finalExecuteCount thay vì totalCount
+              Serial.println("Set executeCount=" + String(finalExecuteCount) + " for completed order: " + orderProductName + " (code: " + orderProductCode + ")");
               break;
             }
           }
@@ -5424,8 +5428,8 @@ void updateCount() {
         needUpdate = true;
         
         Serial.println("Auto Reset completed - ready for next order");
-        publishAlert("AUTO_RESET", "Đơn hàng '" + completedOrderType + "' hoàn thành. " + 
-                    (foundNextOrder ? "Chuyển sang: " + bagType : "Hết đơn hàng"));
+        publishAlert("AUTO_RESET", "SP-" + completedProductCode + " (" + String(finalExecuteCount) + " bao) → " + 
+                    (foundNextOrder ? "SP-" + productCode : "Hết đơn hàng"));
       } else {
         Serial.println("Auto Reset disabled - attempting manual order switch");
         
