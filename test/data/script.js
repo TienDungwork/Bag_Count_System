@@ -2446,6 +2446,11 @@ function selectAllOrders(checked) {
   updateOverview();
 }
 
+// Helper function to get current count from ESP32 device status
+function getCurrentCountFromDevice() {
+  return currentDeviceStatus?.count || 0;
+}
+
 function selectOrder(orderId, checked) {
   console.log('selectOrder called:', orderId, checked);
   
@@ -2458,6 +2463,17 @@ function selectOrder(orderId, checked) {
   const order = activeBatch.orders.find(o => o.id === orderId);
   if (order) {
     console.log('Before update - order.selected:', order.selected);
+    
+    // SAVE CURRENT COUNT WHEN DESELECTING
+    if (!checked && order.selected && countingState.isActive) {
+      // Đang deselect một order đang được đếm
+      const currentCount = getCurrentCountFromDevice();
+      if (currentCount > 0) {
+        order.currentCount = currentCount;
+        console.log(`Saved currentCount ${currentCount} for order ${orderId} when deselecting`);
+      }
+    }
+    
     order.selected = checked;
     console.log('After update - order.selected:', order.selected);
     
@@ -2474,6 +2490,12 @@ function selectOrder(orderId, checked) {
       const plannedQuantity = order.plannedQuantity || order.quantity;
       console.log('Sending product info to ESP32:', productDisplay, 'Target:', plannedQuantity);
       
+      // CHECK IF ORDER HAS EXISTING COUNT TO PRESERVE
+      const existingCount = order.currentCount || 0;
+      const keepExistingCount = existingCount > 0;
+      
+      console.log(`Order has existing count: ${existingCount}, keepCount: ${keepExistingCount}`);
+      
       // Gửi thông tin đơn hàng đầy đủ bao gồm productCode
       sendESP32Command('set_current_order', {
         productName: productName,
@@ -2483,7 +2505,8 @@ function selectOrder(orderId, checked) {
         orderCode: order.orderCode,
         target: plannedQuantity,
         warningQuantity: order.warningQuantity || 5, // Sử dụng warningQuantity của đơn hàng
-        keepCount: false, // Reset count khi chọn đơn mới
+        keepCount: keepExistingCount, // Keep count if order has existing progress
+        currentCount: existingCount, // Send existing count to ESP32
         isRunning: false  // Chỉ set order info, chưa chạy
       }).catch(error => {
         console.error('Failed to send order to ESP32:', error);
@@ -2581,11 +2604,11 @@ function updateOrderTable() {
       </td>
       <td>
         <button class="edit-btn" onclick="editOrderById(${order.id})" 
-                ${order.status === 'counting' ? 'disabled' : ''}>
+                ${order.status === 'counting' && order.currentCount < order.quantity ? 'disabled' : ''}>
           <i class="fas fa-edit"></i>
         </button>
         <button class="delete-btn" onclick="deleteOrder(${order.id})" 
-                ${order.status === 'counting' ? 'disabled' : ''}>
+                ${order.status === 'completed' ? '' : ''}>
           <i class="fas fa-trash"></i>
         </button>
       </td>

@@ -2486,6 +2486,7 @@ server.on("/webfonts/fa-solid-900.ttf", HTTP_GET, [](){
         int warningQuantity = doc["warningQuantity"] | 5;
         bool keepCount = doc["keepCount"] | false;
         bool isRunningOrder = doc["isRunning"] | false;
+        int existingCount = doc["currentCount"] | 0;  // Nhận currentCount từ web
         
         Serial.println("Setting current order:");
         Serial.println("Product: " + productName);
@@ -2495,6 +2496,7 @@ server.on("/webfonts/fa-solid-900.ttf", HTTP_GET, [](){
         Serial.println("Target: " + String(target));
         Serial.println("Warning: " + String(warningQuantity));
         Serial.println("Keep Count: " + String(keepCount));
+        Serial.println("Existing Count: " + String(existingCount));
         Serial.println("Is Running: " + String(isRunningOrder));
         
         // Cập nhật biến hiển thị
@@ -2510,6 +2512,21 @@ server.on("/webfonts/fa-solid-900.ttf", HTTP_GET, [](){
         if (!keepCount) {
           totalCount = 0;
           isLimitReached = false;
+          Serial.println("Reset totalCount to 0 (keepCount = false)");
+        } else if (existingCount > 0) {
+          // Set count to existing value if keepCount = true and existingCount provided
+          totalCount = existingCount;
+          isLimitReached = false; // Reset limit flag to allow continued counting
+          Serial.println("Set totalCount to existing count: " + String(existingCount));
+          
+          // Reset sensor states to ensure counting can continue
+          isBagDetected = false;
+          waitingForInterval = false;
+          lastBagTime = 0;
+          bagStartTime = 0;
+          Serial.println("Reset sensor states for continued counting");
+        } else {
+          Serial.println("Keep existing totalCount: " + String(totalCount) + " (keepCount = true)");
         }
         
         // ĐẶT TRẠNG THÁI RUNNING NẾU isRunning = true
@@ -2945,16 +2962,17 @@ server.on("/webfonts/fa-solid-900.ttf", HTTP_GET, [](){
         // XỬ LÝ XÓA ORDER
         Serial.println("Processing DELETE_ORDER command...");
         if (doc.containsKey("batchId") && doc.containsKey("orderId")) {
-          int batchId = doc["batchId"];
+          long long batchId = doc["batchId"].as<long long>();
           int orderId = doc["orderId"];
           
-          Serial.println("Deleting order - Batch ID: " + String(batchId) + ", Order ID: " + String(orderId));
+          Serial.println("Deleting order - Batch ID: " + String((unsigned long long)batchId) + ", Order ID: " + String(orderId));
           
           // Tìm batch trong ordersData
           bool batchFound = false;
           for (size_t i = 0; i < ordersData.size(); i++) {
-            Serial.println("   - Checking batch with ID: " + String(ordersData[i]["id"].as<int>()));
-            if (ordersData[i]["id"] == batchId) {
+            long long currentBatchId = ordersData[i]["id"].as<long long>();
+            Serial.println("   - Checking batch with ID: " + String((unsigned long long)currentBatchId));
+            if (currentBatchId == batchId) {
               JsonArray orders = ordersData[i]["orders"];
               
               // Tìm và xóa order trong batch
