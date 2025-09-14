@@ -351,63 +351,30 @@ void handleIRCommand(int button) {
       saveBagConfigsToFile();
       updateStartLED();
       needUpdate = true;
-      
-      if (time(nullptr) > 24 * 3600) {
-        startTimeStr = getTimeStr();
-        timeWaitingForSync = false;
-      } else {
-        startTimeStr = "Waiting for time sync...";
-        timeWaitingForSync = true;
-      }
-      
-      for (auto& cfg : bagConfigs) {
-        cfg.status = "RUNNING";
-      }
-      saveBagConfigsToFile();
-      updateStartLED();
-      needUpdate = true;
       break;
       
     case 2: // Pause
-      Serial.println(" IR Remote: PAUSE");
-      isRunning = false;
-      isTriggerEnabled = false;
-      isCountingEnabled = false;
-      currentSystemStatus = "PAUSE";
+      Serial.println("IR Remote: PAUSE");
       isRunning = false;
       isTriggerEnabled = false;
       isCountingEnabled = false;
       currentSystemStatus = "PAUSE";
       action = "PAUSE";
+      
       for (auto& cfg : bagConfigs) {
         cfg.status = "PAUSE";
       }
       saveBagConfigsToFile();
-      for (auto& cfg : bagConfigs) {
-        cfg.status = "PAUSE";
-      }
-      saveBagConfigsToFile();
-      updateStartLED();
-      needUpdate = true;
       updateStartLED();
       needUpdate = true;
       break;
       
     case 3: // Reset
-      Serial.println(" IR Remote: RESET");
+      Serial.println("IR Remote: RESET");
       totalCount = 0;
       isLimitReached = false;
       isRunning = false;
       isTriggerEnabled = false;
-      totalCount = 0;
-      isLimitReached = false;
-      isRunning = false;
-      isTriggerEnabled = false;
-      isCountingEnabled = false;
-      history.clear();
-      startTimeStr = "";
-      timeWaitingForSync = false;
-      currentSystemStatus = "RESET";
       isCountingEnabled = false;
       history.clear();
       startTimeStr = "";
@@ -422,10 +389,7 @@ void handleIRCommand(int button) {
       updateStartLED();
       updateDoneLED();
       needUpdate = true;
-      
-      for (auto& cfg : bagConfigs) {
-        cfg.status = "RESET";
-      }
+      break;
       saveBagConfigsToFile();
       updateStartLED();
       updateDoneLED();
@@ -4538,6 +4502,13 @@ server.on("/webfonts/fa-solid-900.ttf", HTTP_GET, [](){
       Serial.println("Updating selected orders for batch: " + batchId);
       Serial.println("Selected orders count: " + String(selectedOrders.size()));
       
+      // DEBUG: In ra danh sách ID được chọn
+      Serial.print("Selected order IDs: ");
+      for (JsonVariant selectedId : selectedOrders) {
+        Serial.print(String(selectedId.as<int>()) + " ");
+      }
+      Serial.println();
+      
       // Tìm batch và cập nhật selected status
       bool batchFound = false;
       for (size_t i = 0; i < ordersData.size(); i++) {
@@ -4545,18 +4516,25 @@ server.on("/webfonts/fa-solid-900.ttf", HTTP_GET, [](){
           batchFound = true;
           JsonArray orders = ordersData[i]["orders"];
           
-          // Reset tất cả về false
+          // Reset tất cả về false trước
           for (size_t j = 0; j < orders.size(); j++) {
-            orders[j]["selected"] = false;
+            JsonObject order = orders[j];
+            order["selected"] = false;
+            int orderNumber = order["orderNumber"] | 0;
+            String productName = order["productName"].as<String>();
+            Serial.println("Reset order " + String(orderNumber) + " (" + productName + ") selected = false");
           }
           
           // Set selected = true cho các đơn được chọn
           for (JsonVariant selectedId : selectedOrders) {
             int orderId = selectedId.as<int>();
             for (size_t j = 0; j < orders.size(); j++) {
-              if (orders[j]["id"] == orderId) {
-                orders[j]["selected"] = true;
-                Serial.println("Order ID " + String(orderId) + " marked as SELECTED");
+              JsonObject order = orders[j];
+              if (order["id"] == orderId) {
+                order["selected"] = true;
+                int orderNumber = order["orderNumber"] | 0;
+                String productName = order["productName"].as<String>();
+                Serial.println("Order ID " + String(orderId) + " (orderNumber=" + String(orderNumber) + ", product=" + productName + ") marked as SELECTED");
               }
             }
           }
@@ -5383,9 +5361,11 @@ void updateCount() {
           if (currentOrderNumber > 0) break;
         }
         
-        // Tìm đơn hàng tiếp theo (orderNumber + 1) TRONG CÙNG BATCH
-        int nextOrderNumber = currentOrderNumber + 1;
-        Serial.println("Looking for next order with orderNumber=" + String(nextOrderNumber) + " in batch=" + currentBatchId);
+        // Tìm đơn hàng tiếp theo được chọn với orderNumber > currentOrderNumber TRONG CÙNG BATCH
+        Serial.println("Looking for next SELECTED order with orderNumber > " + String(currentOrderNumber) + " in batch=" + currentBatchId);
+        
+        int nextOrderNumber = -1;
+        JsonObject nextOrder;
         
         // CHỈ TÌM TRONG BATCH HIỆN TẠI
         for (size_t i = 0; i < ordersData.size(); i++) {
@@ -5400,6 +5380,7 @@ void updateCount() {
           JsonArray orders = ordersData[i]["orders"];
           Serial.println("Searching in batch " + batchId + " with " + String(orders.size()) + " orders");
           
+          // Duyệt tất cả orders để tìm đơn tiếp theo được chọn
           for (size_t j = 0; j < orders.size(); j++) {
             JsonObject order = orders[j];
             int orderNumber = order["orderNumber"] | 0;
@@ -5409,16 +5390,31 @@ void updateCount() {
             
             Serial.println("  Order " + String(orderNumber) + ": " + productName + " (selected=" + String(selected) + ", status=" + status + ")");
             
-            // CHỈ TÌM ĐƠN ĐƯỢC CHỌN VÀ ĐANG CHỜ
-            if (orderNumber == nextOrderNumber && selected && status == "waiting") {
-              Serial.println("Found SELECTED next order: " + String(orderNumber) + " - " + productName);
+            // TÌM ĐƠN ĐƯỢC CHỌN, ĐANG CHỜ VÀ CÓ orderNumber > currentOrderNumber
+            if (selected && status == "waiting" && orderNumber > currentOrderNumber) {
+              // Tìm đơn có orderNumber nhỏ nhất trong các đơn thỏa mãn
+              if (nextOrderNumber == -1 || orderNumber < nextOrderNumber) {
+                nextOrderNumber = orderNumber;
+                nextOrder = order;
+                Serial.println("Found candidate next order: " + String(orderNumber) + " - " + productName);
+              }
+            }
+          }
+          break; // Chỉ xử lý batch hiện tại
+        }
+        
+        // Nếu tìm thấy đơn tiếp theo
+        if (nextOrderNumber != -1) {
+              String productName = nextOrder["productName"].as<String>();
+              Serial.println("Found SELECTED next order: " + String(nextOrderNumber) + " - " + productName);
+              
               // CẬP NHẬT THÔNG TIN ĐƠN MỚI
               String newProductCode = "";
-              if (order.containsKey("product") && order["product"].containsKey("code")) {
-                newProductCode = order["product"]["code"].as<String>();
+              if (nextOrder.containsKey("product") && nextOrder["product"].containsKey("code")) {
+                newProductCode = nextOrder["product"]["code"].as<String>();
               }
-              int quantity = order["quantity"] | 1;
-              int warningQuantity = order["warningQuantity"].as<int>() | 5; // Mặc định 5 nếu không có
+              int quantity = nextOrder["quantity"] | 1;
+              int warningQuantity = nextOrder["warningQuantity"].as<int>() | 5; // Mặc định 5 nếu không có
               
               Serial.println("Found next order with warningQuantity: " + String(warningQuantity));
               
@@ -5447,7 +5443,7 @@ void updateCount() {
               }
               
               // Cập nhật trạng thái đơn mới thành counting
-              order["status"] = "counting";
+              nextOrder["status"] = "counting";
               
               // CẬP NHẬT BIẾN HIỂN THỊ
               bagType = productName;
@@ -5467,10 +5463,9 @@ void updateCount() {
               
               // Lưu thay đổi vào file
               saveOrdersToFile();
-              break;
-            }
-          }
-          if (foundNextOrder) break;
+        } else {
+          // Không tìm thấy đơn tiếp theo được chọn
+          foundNextOrder = false;
         }
         
         if (!foundNextOrder) {

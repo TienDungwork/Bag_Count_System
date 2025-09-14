@@ -2549,11 +2549,11 @@ function updateOrderTable() {
     // Hiển thị số đếm hiện tại nếu có
     const currentCountText = order.currentCount > 0 ? ` (${order.currentCount})` : '';
     
-    // THAY ĐỔI: Hiển thị thứ tự tự động thay vì orderCode
-    const orderSequence = startIndex + index + 1; // Thứ tự tự động từ 1
+    // THAY ĐỔI: Hiển thị orderNumber thực tế thay vì thứ tự tự động
+    const orderNumber = order.orderNumber || (startIndex + index + 1); // Sử dụng orderNumber thực tế từ data
     
     row.innerHTML = `
-      <td><span class="order-number">${orderSequence}</span></td>
+      <td><span class="order-number">${orderNumber}</span></td>
       <td>
         <input type="checkbox" ${order.selected ? 'checked' : ''} 
                onchange="selectOrder(${order.id}, this.checked)"
@@ -2618,6 +2618,11 @@ async function sendSelectedOrdersToESP32(batch) {
   const selectedOrderIds = selectedOrders.map(o => o.id);
   
   console.log(`Sending ${selectedOrders.length} selected orders to ESP32:`, selectedOrderIds);
+  
+  // DEBUG: Log chi tiết từng đơn hàng được chọn
+  selectedOrders.forEach((order, index) => {
+    console.log(`  Order ${index + 1}: ID=${order.id}, orderNumber=${order.orderNumber}, productName="${order.productName}", selected=${order.selected}, status="${order.status}"`);
+  });
   
   try {
     const response = await fetch('/api/select_orders', {
@@ -2713,7 +2718,7 @@ function updateButtonStates(state) {
       break;
   }
   
-  console.log(`Button states updated to: ${state}, hasSelectedOrders: ${hasSelectedOrders}`);
+  //console.log(`Button states updated to: ${state}, hasSelectedOrders: ${hasSelectedOrders}`);
 }
 
 // Counting Control (Updated)
@@ -3347,18 +3352,24 @@ function updateOverview() {
   updateExecuteCountDisplay(totalCounted, 'updateOverview-batch-total');
   
   // Cập nhật trạng thái nút dựa trên trạng thái đếm hiện tại
-  const hasCountingOrders = selectedOrders.some(o => o.status === 'counting');
-  const hasPausedOrders = selectedOrders.some(o => o.status === 'paused');
-  
-  if (hasCountingOrders) {
-    // Có đơn hàng đang đếm - trạng thái started
+  // ƯU TIÊN countingState.isActive thay vì chỉ dựa vào status đơn hàng
+  if (countingState.isActive) {
+    // Hệ thống đang hoạt động - trạng thái started
     updateButtonStates('started');
-  } else if (hasPausedOrders) {
-    // Có đơn hàng bị tạm dừng - trạng thái paused
-    updateButtonStates('paused');
   } else {
-    // Không có đơn hàng đang đếm - trạng thái reset
-    updateButtonStates('reset');
+    const hasCountingOrders = selectedOrders.some(o => o.status === 'counting');
+    const hasPausedOrders = selectedOrders.some(o => o.status === 'paused');
+    
+    if (hasCountingOrders) {
+      // Có đơn hàng đang đếm nhưng hệ thống không active - trạng thái started
+      updateButtonStates('started');
+    } else if (hasPausedOrders) {
+      // Có đơn hàng bị tạm dừng - trạng thái paused
+      updateButtonStates('paused');
+    } else {
+      // Không có đơn hàng đang đếm - trạng thái reset
+      updateButtonStates('reset');
+    }
   }
 }
 
