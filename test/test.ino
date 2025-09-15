@@ -1030,6 +1030,37 @@ void saveOrdersToFile() {
   Serial.println("Attempting to save orders to file...");
   Serial.println("ordersData size: " + String(ordersData.size()) + " items");
   
+  // TỰ ĐỘNG XÓA CÁC ĐƠN ĐÃ HOÀN THÀNH TRƯỚC KHI LƯU
+  bool hasRemovedOrders = false;
+  Serial.println("Auto-removing completed orders before saving...");
+  
+  // Duyệt qua tất cả các batch
+  for (size_t i = 0; i < ordersData.size(); i++) {
+    JsonArray orders = ordersData[i]["orders"];
+    String batchId = ordersData[i]["id"].as<String>();
+    
+    // Duyệt ngược để tránh lỗi index khi xóa
+    for (int j = orders.size() - 1; j >= 0; j--) {
+      JsonObject order = orders[j];
+      String status = order["status"].as<String>();
+      
+      if (status == "completed") {
+        String productName = order["productName"].as<String>();
+        int orderNumber = order["orderNumber"] | 0;
+        int executeCount = order["executeCount"] | 0;
+        
+        Serial.println("Auto-removing completed order: " + productName + " (orderNumber=" + String(orderNumber) + ", executeCount=" + String(executeCount) + ")");
+        
+        orders.remove(j);
+        hasRemovedOrders = true;
+      }
+    }
+  }
+  
+  if (hasRemovedOrders) {
+    Serial.println("Completed orders auto-removed before saving.");
+  }
+  
   File file = LittleFS.open("/orders.json", "w");
   if (file) {
     size_t bytesWritten = serializeJson(ordersData, file);
@@ -5502,6 +5533,9 @@ void updateCount() {
           publishAlert("BATCH_COMPLETED", "Hoàn thành tất cả đơn hàng trong batch hiện tại!");
           publishStatusMQTT();
           
+          // Lưu ordersData để kích hoạt logic xóa completed orders
+          saveOrdersToFile();
+          
           Serial.println("Batch completed - System stopped. Please select new batch to continue.");
         } else {
           // Đã tìm thấy đơn tiếp theo - gửi thông tin lên web
@@ -5526,14 +5560,44 @@ void updateCount() {
         
         // Manual order switching logic khi autoReset = false
         String completedOrderType = bagType;
+        String completedProductCode = productCode; // Lưu product code của đơn vừa hoàn thành
+        int finalExecuteCount = totalCount; // Lưu executeCount trước khi reset
         
-        // Đánh dấu đơn hiện tại hoàn thành
+        // Đánh dấu đơn hiện tại hoàn thành trong bagConfigs
         for (auto& cfg : bagConfigs) {
           if (cfg.type == completedOrderType) {
             cfg.status = "COMPLETED";
             Serial.println("Manual: Order '" + completedOrderType + "' marked as COMPLETED");
             break;
           }
+        }
+        
+        // Đánh dấu đơn hiện tại hoàn thành trong ordersData (tương tự auto-reset)
+        Serial.println("Manual: Marking completed order in ordersData - " + completedOrderType + " (code: " + completedProductCode + ")");
+        for (size_t i = 0; i < ordersData.size(); i++) {
+          String batchId = ordersData[i]["id"].as<String>();
+          if (batchId != currentBatchId) continue;
+          
+          JsonArray orders = ordersData[i]["orders"];
+          for (size_t j = 0; j < orders.size(); j++) {
+            JsonObject order = orders[j];
+            String orderProductName = order["productName"].as<String>();
+            String orderProductCode = "";
+            if (order.containsKey("product") && order["product"].containsKey("code")) {
+              orderProductCode = order["product"]["code"].as<String>();
+            }
+            bool selected = order["selected"] | false;
+            
+            // Tìm đơn có cùng productName VÀ productCode với đơn vừa hoàn thành VÀ được chọn
+            if (orderProductName == completedOrderType && orderProductCode == completedProductCode && selected) {
+              Serial.println("Manual: Found completed order in ordersData, marking as completed");
+              order["status"] = "completed";
+              order["executeCount"] = finalExecuteCount;
+              Serial.println("Manual: Set executeCount=" + String(finalExecuteCount) + " for completed order: " + orderProductName + " (code: " + orderProductCode + ")");
+              break;
+            }
+          }
+          break;
         }
         
         // Tìm đơn hàng tiếp theo
@@ -5579,6 +5643,9 @@ void updateCount() {
         if (!foundNextOrder) {
           Serial.println("No orders available for manual switch");
         }
+        
+        // Lưu thay đổi ordersData sau manual completion
+        saveOrdersToFile();
       }
       
       // Legacy MQTT (giữ lại để tương thích)
