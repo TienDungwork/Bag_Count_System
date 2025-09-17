@@ -157,7 +157,8 @@ PubSubClient mqtt(ethClient);
 #define START_LED_PIN 38  // relay chạy bắt đầu đếm
 #define DONE_LED_PIN 5   // còi báo đến ngưỡng hoàn thành
 //----------------------------------Button
-#define BUTTON_PIN3 2  // Button 3 - ngắt relay
+#define BUTTON_PIN2 42 // Button 2 - ngắt relay
+#define BUTTON_PIN3 2  // Button 3 - đóng relay
 
 //----------------------------------------IR Remote pin
 #define RECV_PIN 1  // Chân nhận tín hiệu IR
@@ -190,6 +191,11 @@ bool isWarningLedActive = false;         // Đang trong trạng thái cảnh bá
 bool hasReachedWarningThreshold = false; // Đã đạt ngưỡng cảnh báo
 //BUTTON
 bool isManualRelayOn = false;
+bool isManualRelayOff = false;
+// Button timing variables
+unsigned long button3Timer = 0;      // Timer cho button 3
+bool button3Pressed = false;          // Trạng thái đã nhấn button 3
+const unsigned long button3Duration = 10000; // 10 giây
 
 //----------------------------------------
 #define PANEL_RES_X 64
@@ -5738,16 +5744,29 @@ void updateDoneLED() {
 
 void updateStartLED() {
   // Đèn START (GPIO 38 - relay) logic cập nhật:
-  // - Sáng (LOW) khi: isRunning = true HOẶC đang trong thời gian relay delay
-  // - Tắt (HIGH) khi: isRunning = false VÀ không trong thời gian relay delay
+  // Priority: Manual control > Auto control
   
-  if (isRunning || isRelayDelayActive) {
-    startLedOn = true;  // Sáng (LOW) - relay hoạt động
-  } else {
-    startLedOn = false; // Tắt (HIGH) - relay ngưng
+  // Manual OFF có ưu tiên cao nhất
+  if (isManualRelayOff) {
+    digitalWrite(START_LED_PIN, LOW);  // LOW = tắt relay
+    return;
   }
   
-  if (!isManualRelayOn) {
+  // Manual ON có ưu tiên thứ 2
+  if (isManualRelayOn) {
+    digitalWrite(START_LED_PIN, HIGH);   // HIGH = bật relay
+    return;
+  }
+  
+  // Auto control
+  if (isRunning || isRelayDelayActive) {
+    startLedOn = true;  // Sáng (HIGH) - relay hoạt động
+  } else {
+    startLedOn = false; // Tắt (LOW) - relay ngưng
+  }
+  
+  // Auto control chỉ hoạt động khi không có manual override
+  if (!isManualRelayOn && !isManualRelayOff) {
     digitalWrite(START_LED_PIN, startLedOn ? HIGH : LOW);
   }
   
@@ -5825,6 +5844,7 @@ void setup() {
   pinMode(TRIGGER_SENSOR_PIN, INPUT);
   pinMode(START_LED_PIN, OUTPUT);
   pinMode(DONE_LED_PIN, OUTPUT);
+  pinMode(BUTTON_PIN2, INPUT_PULLUP);
   pinMode(BUTTON_PIN3, INPUT_PULLUP);
   
   // Khởi tạo IR Remote
@@ -5832,8 +5852,8 @@ void setup() {
   Serial.println("IR Remote initialized");
   
   // Tắt LED ban đầu
-  digitalWrite(START_LED_PIN, LOW);  // Đèn START tắt (HIGH)
-  digitalWrite(DONE_LED_PIN, LOW);   // Đèn DONE tắt (HIGH)
+  digitalWrite(START_LED_PIN, LOW);  // Đèn START tắt (LOW)
+  digitalWrite(DONE_LED_PIN, LOW);   // Đèn DONE tắt (LOW)
   
   // BƯỚC 4: Khởi tạo các biến trạng thái
   isRunning = false;
@@ -6011,12 +6031,22 @@ void setup() {
 }
 
 void loop() {
-  // Ưu tiên nút bấm BUTTON_PIN3: relay luôn đóng khi nhấn
+  // Xử lý Button 2 - BUTTON_PIN2 (Tắt relay)
+  if (digitalRead(BUTTON_PIN2) == LOW) {
+    isManualRelayOff = true;           // Bắt buộc tắt relay
+    isManualRelayOn = false;           // Hủy  bật
+    button3Pressed = false;            // Reset button 3
+    button3Timer = 0;                  // Reset timer
+    digitalWrite(START_LED_PIN, LOW); // LOW = tắt relay ngay lập tức
+    Serial.println("BUTTON 2 - RELAY OFF");
+  }
+  
+  // Xử lý Button 3 - BUTTON_PIN3 (Bật relay)
   if (digitalRead(BUTTON_PIN3) == LOW) {
-    isManualRelayOn = true;
-    digitalWrite(START_LED_PIN, LOW);
-  } else {
-    isManualRelayOn = false;
+    isManualRelayOn = true;            // Bắt buộc bật relay
+    isManualRelayOff = false;          // Hủy tắt
+    digitalWrite(START_LED_PIN, HIGH);  // HIGH = bật relay ngay lập tức
+    Serial.println("BUTTON 3 - RELAY ON");
   }
   // Ensure warning LED timeout is evaluated continuously so the LED will
   // turn off after the configured 5 second window even when no new
