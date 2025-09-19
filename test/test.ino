@@ -311,7 +311,37 @@ unsigned long mapIRButton(unsigned long code) {
   if (code == 0xFF22DD || code == 0x52A3D41F) return 4;
   return 0;
 }
+<<<<<<< HEAD
 
+=======
+// void Button(){
+//   JsonDocument doc;
+//   String msg;
+//   String action = "";
+//   static bool lastButton3State = HIGH;
+//   static bool lastButton2State = HIGH;
+  
+//   // BUTTON_PIN3- đóng relay
+//   bool currentButton3State = digitalRead(BUTTON_PIN3);
+//   if (lastButton3State == HIGH && currentButton3State == LOW) {
+//     isRunning = true; 
+//     currentSystemStatus = "RUNNING";
+//     action = "START";
+//     updateStartLED();
+// //   }
+// //   lastButton3State = currentButton3State;
+
+//   // BUTTON_PIN2- ngắt relay
+//   bool currentButton2State = digitalRead(BUTTON_PIN2);
+//   if (lastButton2State == HIGH && currentButton2State == LOW) {
+//     isRunning = false;
+//     currentSystemStatus = "PAUSE";
+//     action = "PAUSE";
+//     updateStartLED();
+//   }
+//   lastButton2State = currentButton2State;
+// }
+>>>>>>> 5a10274c18b1c879bd136250b14ce8ba70e1f28c
 void handleIRCommand(int button) {
   // Khai báo biến ở ngoài switch để tránh lỗi biên dịch
   JsonDocument doc;
