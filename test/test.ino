@@ -158,7 +158,7 @@ PubSubClient mqtt(ethClient);
 #define DONE_LED_PIN 5   // còi báo đến ngưỡng hoàn thành
 //----------------------------------Button
 #define BUTTON_PIN3 2  // Button 3 - ngắt relay
-#define BUTTON_PIN2 42  // Button 2 - ngắt relay
+
 //----------------------------------------IR Remote pin
 #define RECV_PIN 1  // Chân nhận tín hiệu IR
 
@@ -189,7 +189,7 @@ unsigned long warningLedStartTime = 0;   // Thời gian bắt đầu bật LED c
 bool isWarningLedActive = false;         // Đang trong trạng thái cảnh báo
 bool hasReachedWarningThreshold = false; // Đã đạt ngưỡng cảnh báo
 //BUTTON
-// bool isManualRelayOn = false;
+bool isManualRelayOn = false;
 
 //----------------------------------------
 #define PANEL_RES_X 64
@@ -311,33 +311,7 @@ unsigned long mapIRButton(unsigned long code) {
   if (code == 0xFF22DD || code == 0x52A3D41F) return 4;
   return 0;
 }
-void Button(){
-  JsonDocument doc;
-  String msg;
-  String action = "";
-  static bool lastButton3State = HIGH;
-  static bool lastButton2State = HIGH;
-  
-  // BUTTON_PIN3- đóng relay
-  bool currentButton3State = digitalRead(BUTTON_PIN3);
-  if (lastButton3State == HIGH && currentButton3State == LOW) {
-    isRunning = true; 
-    currentSystemStatus = "RUNNING";
-    action = "START";
-    updateStartLED();
-  }
-  lastButton3State = currentButton3State;
 
-  // BUTTON_PIN2- ngắt relay
-  bool currentButton2State = digitalRead(BUTTON_PIN2);
-  if (lastButton2State == HIGH && currentButton2State == LOW) {
-    isRunning = false;
-    currentSystemStatus = "PAUSE";
-    action = "PAUSE";
-    updateStartLED();
-  }
-  lastButton2State = currentButton2State;
-}
 void handleIRCommand(int button) {
   // Khai báo biến ở ngoài switch để tránh lỗi biên dịch
   JsonDocument doc;
@@ -346,7 +320,11 @@ void handleIRCommand(int button) {
   
   switch(button) {
     case 1: // Start
-      Serial.println("IR Remote: START");
+      Serial.println("🎛️ IR Remote: START");
+      isRunning = true;
+      isTriggerEnabled = true;
+      isCountingEnabled = true;
+      currentSystemStatus = "RUNNING";
       isRunning = true;
       isTriggerEnabled = true;
       isCountingEnabled = true;
@@ -833,7 +811,7 @@ void loadSettingsFromFile() {
       autoReset = doc["autoReset"].as<bool>();
       relayDelayAfterComplete = doc["relayDelayAfterComplete"].as<int>();
       
-      // Load MQTT settings `
+      // Load MQTT settings
       if (doc.containsKey("mqttServer")) {
         mqtt_server = doc["mqttServer"].as<String>();
       }
@@ -1954,8 +1932,8 @@ void publishSensorData() {
   doc["sensorTriggered"] = isCountingEnabled;
   doc["triggerEnabled"] = isTriggerEnabled;
   doc["lastTrigger"] = millis();
-  doc["sensorState"] = digitalRead(SENSOR_PIN) == LOW ? "DETECTED" : "CLEAR";
-  doc["triggerState"] = digitalRead(TRIGGER_SENSOR_PIN) == LOW ? "DETECTED" : "CLEAR";
+  doc["sensorState"] = digitalRead(SENSOR_PIN) == HIGH ? "DETECTED" : "CLEAR";
+  doc["triggerState"] = digitalRead(TRIGGER_SENSOR_PIN) == HIGH ? "DETECTED" : "CLEAR";
   doc["timestamp"] = getTimeStr();
   
   String message;
@@ -5769,9 +5747,9 @@ void updateStartLED() {
     startLedOn = false; // Tắt (HIGH) - relay ngưng
   }
   
-  // if (!isManualRelayOn) {
-  //   digitalWrite(START_LED_PIN, startLedOn ? HIGH : LOW);
-  // }
+  if (!isManualRelayOn) {
+    digitalWrite(START_LED_PIN, startLedOn ? HIGH : LOW);
+  }
   
   // Debug relay state
   static bool lastRelayState = false;
@@ -6033,13 +6011,13 @@ void setup() {
 }
 
 void loop() {
-  // // Ưu tiên nút bấm BUTTON_PIN3: relay luôn đóng khi nhấn
-  // if (digitalRead(BUTTON_PIN3) == LOW) {
-  //   isManualRelayOn = true;
-  //   digitalWrite(START_LED_PIN, LOW);
-  // } else {
-  //   isManualRelayOn = false;
-  // }
+  // Ưu tiên nút bấm BUTTON_PIN3: relay luôn đóng khi nhấn
+  if (digitalRead(BUTTON_PIN3) == LOW) {
+    isManualRelayOn = true;
+    digitalWrite(START_LED_PIN, LOW);
+  } else {
+    isManualRelayOn = false;
+  }
   // Ensure warning LED timeout is evaluated continuously so the LED will
   // turn off after the configured 5 second window even when no new
   // bag count events occur.
@@ -6154,7 +6132,7 @@ void loop() {
       if (reading != sensorState) {
         sensorState = reading;
         
-        if (sensorState == HIGH) {  // Phát hiện bao (đảo logic)
+        if (sensorState == HIGH) {  // Phát hiện bao
           unsigned long currentTime = millis();
           
           // Kiểm tra khoảng cách tối thiểu giữa 2 bao (minBagInterval từ settings)
@@ -6167,30 +6145,6 @@ void loop() {
               Serial.print("BẮT ĐẦU phát hiện bao - thời gian xác nhận: ");
               Serial.print(bagDetectionDelay);
               Serial.println("ms");
-            } else {
-              // Đã phát hiện bao trước đó, kiểm tra xem đã đủ thời gian xác nhận chưa
-              unsigned long detectionDuration = currentTime - bagStartTime;
-              if (detectionDuration >= bagDetectionDelay) {
-                // ĐỦ THỜI GIAN XÁC NHẬN → ĐẾMMM BAO!
-                Serial.print("XÁC NHẬN BAO (liên tục)! Thời gian: ");
-                Serial.print(detectionDuration);
-                Serial.print("ms >= ");
-                Serial.print(bagDetectionDelay);
-                Serial.print("ms. Count: ");
-                Serial.print(totalCount);
-                Serial.print(" -> ");
-                Serial.println(totalCount + 1);
-                
-                updateCount();
-                needUpdate = true;
-                lastBagTime = currentTime;
-                
-                // Reset để chuẩn bị cho bao tiếp theo
-                isBagDetected = false;
-                
-                // MQTT: Publish sensor data
-                publishSensorData();
-              }
             }
             
           } else {
@@ -6202,7 +6156,7 @@ void loop() {
           }
           
         } else {
-          // Sensor không phát hiện (LOW)
+          // Sensor không phát hiện
           if (isBagDetected) {
             unsigned long detectionDuration = millis() - bagStartTime;
             
@@ -6237,13 +6191,41 @@ void loop() {
           }
         }
       }
+      
+      // THÊM: Kiểm tra thời gian phát hiện liên tục khi sensor vẫn HIGH
+      if (sensorState == HIGH && isBagDetected) {
+        unsigned long currentTime = millis();
+        unsigned long detectionDuration = currentTime - bagStartTime;
+        
+        if (detectionDuration >= bagDetectionDelay && currentTime - lastBagTime >= minBagInterval) {
+          // ĐỦ THỜI GIAN XÁC NHẬN → ĐẾMMM BAO!
+          Serial.print("XÁC NHẬN BAO (liên tục)! Thời gian: ");
+          Serial.print(detectionDuration);
+          Serial.print("ms >= ");
+          Serial.print(bagDetectionDelay);
+          Serial.print("ms. Count: ");
+          Serial.print(totalCount);
+          Serial.print(" -> ");
+          Serial.println(totalCount + 1);
+          
+          updateCount();
+          needUpdate = true;
+          lastBagTime = currentTime;
+          
+          // Reset để chuẩn bị cho bao tiếp theo
+          // isBagDetected = false;
+          bagStartTime = currentTime; /
+          // MQTT: Publish sensor data
+          publishSensorData();
+        }
+      }
     }
     lastSensorState = reading;
     
   } else if (isCountingEnabled && !isRunning) {
     // Đã kích hoạt counting nhưng hệ thống đang pause
     int reading = digitalRead(SENSOR_PIN);
-    if (reading == LOW) {
+    if (reading == HIGH) {
       Serial.println("Phát hiện bao nhưng hệ thống đang PAUSE");
     }
   }
