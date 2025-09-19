@@ -157,7 +157,8 @@ PubSubClient mqtt(ethClient);
 #define START_LED_PIN 38  // relay chạy bắt đầu đếm
 #define DONE_LED_PIN 5   // còi báo đến ngưỡng hoàn thành
 //----------------------------------Button
-#define BUTTON_PIN3 2  // Button 3 - ngắt relay
+#define BUTTON_PIN3 2  // Button 3 - đóng relay
+#define BUTTON_PIN2 42  // Button 2 - ngắt relay
 
 //----------------------------------------IR Remote pin
 #define RECV_PIN 1  // Chân nhận tín hiệu IR
@@ -5737,6 +5738,50 @@ void updateDoneLED() {
 }
 
 void updateStartLED() {
+  JsonDocument doc;
+  String msg;
+  String action = "";
+  // Xử lý nút bấm BUTTON_PIN3
+  static bool lastButtonState = HIGH;
+  static unsigned long lastButtonTime = 0;
+  static unsigned long buttonDebounceTime = 200; // 200ms debounce
+  
+  bool currentButtonState = digitalRead(BUTTON_PIN3);
+  if (currentButtonState == LOW && lastButtonState == HIGH) {
+    if (millis() - lastButtonTime > buttonDebounceTime) {
+      isRunning = true;
+      currentSystemStatus = "RUNNING";
+      action = "START";
+      Serial.println("BUTTON_PIN3 press");
+      
+      needUpdate = true;
+      lastButtonTime = millis();
+    }
+  }
+  
+  lastButtonState = currentButtonState;
+
+  // Xử lý nút bấm BUTTON_PIN2
+  static bool lastButton2State = HIGH;
+  static unsigned long lastButton2Time = 0;
+  static unsigned long button2DebounceTime = 200; // 200ms debounce
+  
+  bool currentButton2State = digitalRead(BUTTON_PIN2);
+  if (currentButton2State == LOW && lastButton2State == HIGH) {
+    if (millis() - lastButton2Time > button2DebounceTime) {
+      // CHỈ TẮT - không toggle
+      isRunning = false;
+      currentSystemStatus = "PAUSE";
+      action = "PAUSE";
+      Serial.println("BUTTON_PIN2 press");
+      
+      needUpdate = true;
+      lastButton2Time = millis();
+    }
+  }
+  
+  lastButton2State = currentButton2State;
+
   // Đèn START (GPIO 38 - relay) logic cập nhật:
   // - Sáng (LOW) khi: isRunning = true HOẶC đang trong thời gian relay delay
   // - Tắt (HIGH) khi: isRunning = false VÀ không trong thời gian relay delay
@@ -5826,6 +5871,7 @@ void setup() {
   pinMode(START_LED_PIN, OUTPUT);
   pinMode(DONE_LED_PIN, OUTPUT);
   pinMode(BUTTON_PIN3, INPUT_PULLUP);
+  pinMode(BUTTON_PIN2, INPUT_PULLUP);
   
   // Khởi tạo IR Remote
   irrecv.enableIRIn();
@@ -6011,13 +6057,6 @@ void setup() {
 }
 
 void loop() {
-  // Ưu tiên nút bấm BUTTON_PIN3: relay luôn đóng khi nhấn
-  if (digitalRead(BUTTON_PIN3) == LOW) {
-    isManualRelayOn = true;
-    digitalWrite(START_LED_PIN, LOW);
-  } else {
-    isManualRelayOn = false;
-  }
   // Ensure warning LED timeout is evaluated continuously so the LED will
   // turn off after the configured 5 second window even when no new
   // bag count events occur.
